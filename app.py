@@ -367,13 +367,15 @@ def compare_plans(req: CompareReq):
         "final_totals": final_tot,
         "residual_diff": diffs
     }
-# ---------- SUGGESTION DE RECETTE (iso-kcal & iso-prot) ----------
+# ---------- SUGGESTION DE RECETTE (iso-kcal & iso-prot) — robuste ----------
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import numpy as np
+import difflib
 
 class SuggestReq(BaseModel):
-    current: list[dict]          # [{"aliment": "...", "grams": 100}, ...]
-    likes: list[str]             # ["chips","yogourt grec","fruit",...]
+    current: List[Dict[str, Any]]   # [{"aliment": "...", "grams": 100}, ...]
+    likes:   List[str]               # ["chips","yogourt grec","fruit",...]
     round_to: int = 5
 
 LIKE_MAP = {
@@ -383,6 +385,7 @@ LIKE_MAP = {
     "fruit": ["Pomme", "Banane", "Fraises", "Bleuets", "Raisin"],
     "pâtes": ["Spaghetti, cuit", "Macaroni, cuit", "Pâtes, cuites"],
     "riz": ["Riz brun, grains longs, cuit", "Riz blanc à grains longs, cuit", "Riz sauvage, cuit"],
+    "croustilles": ["Croustilles", "Croustilles de maïs"],
 }
 
 def _row_strict(name: str):
@@ -390,113 +393,172 @@ def _row_strict(name: str):
     return rows.iloc[0] if not rows.empty else None
 
 def _per_g(row):
-    return float(row["protein_g_per_100g"])/100.0, float(row["kcal_per_100g"])/100.0
+    # sécurité : si une colonne manque ou est NaN, on met 0
+    def safe_get(col):
+        try:
+            v = float(row[col])
+            if v != v:  # NaN
+                return 0.0
+            return v
+        except Exception:
+            return 0.0
+    p100 = safe_get("protein_g_per_100g")
+    k100 = safe_get("kcal_per_100g")
+    return p100/100.0, k100/100.0
 
-def _best_like_matches(likes, foods, k=3):
+def _best_like_matches(likes: List[str], foods: List[str], k: int = 3) -> List[str]:
     got = []
     low = [f.lower() for f in foods]
     for like in likes:
-        keys = LIKE_MAP.get(like.strip().lower(), [like])
+        base = like.strip().lower()
+        keys = LIKE_MAP.get(base, [like])
+        # 1) “contains” (tolérant)
         for key in keys:
             keyl = key.lower()
             hits = [foods[i] for i, f in enumerate(low) if keyl in f]
             for h in hits:
-                if h not in got: got.append(h)
-            if len(got) >= 6: break
-        if len(got) >= 6: break
+                if h not in got:
+                    got.append(h)
+            if len(got) >= 6:
+                break
+        if len(got) >= 6:
+            break
+        # 2) fuzzy (au cas où)
+        close = difflib.get_close_matches(base, low, n=4, cutoff=0.6)
+        for c in close:
+            idx = low.index(c)
+            cand = foods[idx]
+            if cand not in got:
+                got.append(cand)
+        if len(got) >= 6:
+            break
     if not got:
+        # filets de sécurité (toujours présents dans la base, à adapter si besoin)
         got = ["Yogourt grec, nature, 0%", "Pomme", "Spaghetti, cuit"]
-    return got[:3]
+    # dédoublonne et limite
+    out = []
+    for x in got:
+        if x not in out:
+            out.append(x)
+    return out[:k]
+
+def _bounds_for(nm: str):
+    l = nm.lower()
+    if "croustille" in l or "chips" in l: return (15, 60)
+    if "yogourt" in l: return (100, 300)
+    if "pomme" in l or "banane" in l or "fraise" in l: return (80, 250)
+    if "spaghetti" in l or "pâtes" in l: return (100, 250)
+    if "riz" in l: return (100, 250)
+    return (0, None)
 
 @app.post("/suggest-plan")
 def suggest_plan(req: SuggestReq):
-    # totaux du plan actuel
-    cur_tot = totals_for_plan(req.current)  # utilise les fonctions déjà présentes
+    try:
+        # 1) Totaux du plan actuel
+        cur_tot = totals_for_plan(req.current)
 
-    # candidats depuis les envies
-    cand = _best_like_matches(req.likes, FOODS, k=3)
-    P,K,names = [],[],[]
-    for nm in cand:
-        r = _row_strict(nm) or row_for(nm)
-        if r is None: continue
-        p,k = _per_g(r)
-        if p==0 and k==0: continue
-        names.append(nm); P.append(p); K.append(k)
-    if len(P) < 2:
-        return {"error":"Pas assez de candidats valides depuis les envies."}
+        # 2) Candidats issus des envies (tolérant)
+        cand = _best_like_matches(req.likes, FOODS, k=3)
 
-    # Résoudre A x = b (iso-prot & iso-kcal), avec bornes simples
-    A = np.vstack([P, K])                                  # 2 x n
-    b = np.array([cur_tot["prot_g"], cur_tot["kcal"]])     # 2
-    # bornes simples (éviter solutions absurdes)
-    def bounds_for(nm):
-        l = nm.lower()
-        if "croustille" in l or "chips" in l: return (15, 60)
-        if "yogourt" in l: return (100, 300)
-        if "pomme" in l or "banane" in l or "fraise" in l: return (80, 250)
-        if "spaghetti" in l or "pâtes" in l: return (100, 250)
-        if "riz" in l: return (100, 250)
-        return (0, None)
+        names: List[str] = []
+        P: List[float] = []
+        K: List[float] = []
+        bounds: List[tuple] = []
+        for nm in cand:
+            r = _row_strict(nm) or row_for(nm)
+            if r is None:
+                continue
+            p, k = _per_g(r)
+            # écarte les candidats sans prot ET sans kcal
+            if abs(p) < 1e-9 and abs(k) < 1e-9:
+                continue
+            names.append(nm)
+            P.append(p)
+            K.append(k)
+            bounds.append(_bounds_for(nm))
 
-    # point de départ = bornes basses
-    x = np.array([bounds_for(n)[0] for n in names], dtype=float)
-    b2 = b - np.array([np.dot(P, x), np.dot(K, x)])
+        if len(P) < 2:
+            return {"error": "Pas assez de candidats valides extraits des envies.", "candidates_seen": cand}, 400
 
-    active = [i for i in range(len(names)) if True]
-    for _ in range(6):
-        if not active: break
-        A2 = A[:, active]
-        sol, *_ = np.linalg.lstsq(A2.T, b2, rcond=None)
-        cand_x = x.copy()
-        for j, i in enumerate(active):
-            cand_x[i] = x[i] + sol[j]
-        violated = []
-        for i, nm in enumerate(names):
-            lo, hi = bounds_for(nm)
-            if cand_x[i] < lo: cand_x[i] = lo; violated.append(i)
-            if hi is not None and cand_x[i] > hi: cand_x[i] = hi; violated.append(i)
-        if not violated:
-            x = cand_x
-            break
-        # fige les violés et ré-absorbe dans b2
-        for i in set(violated):
-            dx = cand_x[i] - x[i]
-            b2 = b2 - np.array([P[i]*dx, K[i]*dx])
-            x[i] = cand_x[i]
-            if i in active: active.remove(i)
+        # 3) Résoudre A x = b pour égaler EXACTEMENT prot & kcal (puis appliquer bornes)
+        A = np.vstack([P, K])                                # 2 x n
+        b = np.array([cur_tot["prot_g"], cur_tot["kcal"]])   # 2
 
-    # arrondi et contrôle tolérances (±10 kcal, ±3 g prot)
-    step = max(1, int(req.round_to))
-    x = np.array([round(g/step)*step for g in x], dtype=float)
+        # point de départ = bornes basses
+        x = np.array([bounds[i][0] if bounds[i][0] is not None else 0.0 for i in range(len(names))], dtype=float)
+        # retirer ce qu'on a déjà mis
+        b2 = b - np.array([np.dot(P, x), np.dot(K, x)])
 
-    suggestion = [{"aliment": names[i], "grams": float(x[i])} for i in range(len(names))]
-    final = totals_for_plan(suggestion)
-    diff = {"kcal": round(cur_tot["kcal"]-final["kcal"],2),
-            "prot_g": round(cur_tot["prot_g"]-final["prot_g"],2)}
+        active = [i for i in range(len(names))]
+        for _ in range(6):
+            if not active:
+                break
+            A2 = A[:, active]
+            # moindres carrés sur transposée (2 x n_active)
+            sol, *_ = np.linalg.lstsq(A2.T, b2, rcond=None)
+            cand_x = x.copy()
+            for j, i in enumerate(active):
+                cand_x[i] = x[i] + float(sol[j])
+            # applique bornes
+            violated = []
+            for i, nm in enumerate(names):
+                lo, hi = bounds[i]
+                if cand_x[i] < lo:
+                    cand_x[i] = lo; violated.append(i)
+                if hi is not None and cand_x[i] > hi:
+                    cand_x[i] = hi; violated.append(i)
+            if not violated:
+                x = cand_x
+                break
+            # fige les violés et retire leur contribution
+            for i in set(violated):
+                dx = cand_x[i] - x[i]
+                b2 = b2 - np.array([P[i]*dx, K[i]*dx])
+                x[i] = cand_x[i]
+                if i in active:
+                    active.remove(i)
 
-    # petit ajustement glouton si hors tolérances
-    for _ in range(20):
-        okK = abs(diff["kcal"]) <= 10
-        okP = abs(diff["prot_g"]) <= 3
-        if okK and okP: break
-        # bouge l'item qui influence le plus la grandeur dominante
-        goal = "kcal" if abs(diff["kcal"])>=abs(diff["prot_g"]) else "prot"
-        idx = int(np.argmax(K if goal=="kcal" else P))
-        sgn = 1 if (diff["kcal"]>0 if goal=="kcal" else diff["prot_g"]>0) else -1
-        lo, hi = bounds_for(names[idx])
-        newg = x[idx] + sgn*step
-        if (hi is not None and newg>hi) or newg<lo: break
-        x[idx] = newg
-        suggestion[idx]["grams"] = float(newg)
+        # 4) Arrondi + micro-ajustement toléré (±10 kcal, ±3 g prot)
+        step = max(1, int(req.round_to))
+        x = np.array([round(g/step)*step for g in x], dtype=float)
+
+        suggestion = [{"aliment": names[i], "grams": float(x[i])} for i in range(len(names))]
         final = totals_for_plan(suggestion)
-        diff = {"kcal": round(cur_tot["kcal"]-final["kcal"],2),
-                "prot_g": round(cur_tot["prot_g"]-final["prot_g"],2)}
+        diff = {"kcal": round(cur_tot["kcal"]-final["kcal"], 2),
+                "prot_g": round(cur_tot["prot_g"]-final["prot_g"], 2)}
 
-    return {
-        "current_totals": cur_tot,
-        "likes": req.likes,
-        "candidates": names,
-        "suggested_recipe": suggestion,
-        "final_totals": final,
-        "residual_diff": diff
-    }
+        # micro-ajustement si hors tolérances
+        for _ in range(30):
+            okK = abs(diff["kcal"]) <= 10
+            okP = abs(diff["prot_g"]) <= 3
+            if okK and okP:
+                break
+            # choisit la variable la plus efficace sur la grandeur dominante
+            goal_k = abs(diff["kcal"]) >= abs(diff["prot_g"])
+            coeffs = K if goal_k else P
+            idx = int(np.argmax(np.abs(coeffs)))
+            lo, hi = bounds[idx]
+            newg = x[idx] + (step if (diff["kcal"] > 0 if goal_k else diff["prot_g"] > 0) else -step)
+            if (hi is not None and newg > hi) or newg < lo:
+                # essaie l'autre sens
+                newg = x[idx] - (step if (diff["kcal"] > 0 if goal_k else diff["prot_g"] > 0) else -step)
+                if (hi is not None and newg > hi) or newg < lo:
+                    break
+            x[idx] = newg
+            suggestion[idx]["grams"] = float(newg)
+            final = totals_for_plan(suggestion)
+            diff = {"kcal": round(cur_tot["kcal"]-final["kcal"], 2),
+                    "prot_g": round(cur_tot["prot_g"]-final["prot_g"], 2)}
+
+        return {
+            "current_totals": cur_tot,
+            "likes": req.likes,
+            "candidates": names,
+            "suggested_recipe": suggestion,
+            "final_totals": final,
+            "residual_diff": diff
+        }
+    except Exception as e:
+        # renvoie une erreur lisible plutôt qu'un 500 silencieux
+        return {"error": f"suggest-plan failed: {str(e)}"}, 400
+
