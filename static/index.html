@@ -1,34 +1,53 @@
-
 <!doctype html><meta charset="utf-8">
 <title>FM Équivalences</title>
 <style>
-body{font:16px system-ui;margin:24px;max-width:820px}
-input,select,button{font:inherit;padding:8px;margin:6px 0}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.card{border:1px solid #eee;padding:16px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.06)}
-pre{background:#f8f8f8;padding:12px;border-radius:8px;overflow:auto}
-label{display:block;margin-top:8px}
-h1{margin-top:0}
+  :root{--fg:#111;--muted:#666;--bg:#fff;--card:#fff;--border:#eaeaea}
+  body{font:16px system-ui,Segoe UI,Roboto,Helvetica,Arial;margin:24px;max-width:980px;color:var(--fg);background:var(--bg)}
+  h1{margin:0 0 8px 0}
+  .muted{color:var(--muted);font-size:14px}
+  .tabs{display:flex;gap:10px;margin:18px 0}
+  .tab{padding:10px 14px;border:1px solid var(--border);border-radius:12px;cursor:pointer;background:#fafafa}
+  .tab.active{background:#fff;border-color:#d9d9d9;box-shadow:0 2px 6px rgba(0,0,0,.06)}
+  .card{border:1px solid var(--border);border-radius:14px;padding:16px;margin:10px 0;box-shadow:0 2px 6px rgba(0,0,0,.06);background:var(--card)}
+  label{display:block;margin:6px 0 4px}
+  input,select,button,textarea{font:inherit;padding:9px;border:1px solid var(--border);border-radius:10px}
+  input[type=number]{width:120px}
+  button{cursor:pointer}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .grid-3{display:grid;grid-template-columns:1fr 120px 40px;gap:10px;align-items:center}
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid-1{display:grid;grid-template-columns:1fr;gap:10px}
+  .pill{display:inline-block;padding:2px 8px;border:1px solid var(--border);border-radius:999px;font-size:12px;margin-right:6px}
+  pre{background:#f8f8f8;padding:12px;border-radius:10px;overflow:auto}
+  .ok{color:#0a7a2f}.warn{color:#b55b00}.err{color:#b00020}
+  .foot{font-size:12px;color:#777;margin-top:8px}
 </style>
 
 <h1>Équivalences alimentaires (FM)</h1>
+<div class="muted">Choisis un onglet : Équivalence simple ou Alternative repas complet.</div>
 
-<div class="card">
-  <h3>Calcul direct</h3>
+<div class="tabs">
+  <div class="tab active" id="tab-simple">Équivalence simple</div>
+  <div class="tab" id="tab-meal">Alternative repas complet</div>
+</div>
+
+<!-- ÉQUIVALENCE SIMPLE -->
+<section class="card" id="view-simple">
+  <h3>Équivalence simple</h3>
   <div class="row">
     <div>
-      <label>Source</label>
+      <label>Source (aliment)</label>
       <input id="s" placeholder="ex: Riz blanc à grains longs, cuit" list="s-dl">
       <datalist id="s-dl"></datalist>
     </div>
     <div>
-      <label>Grammes</label>
-      <input id="g" type="number" value="100" min="1">
+      <label>Grammes (source)</label>
+      <input id="g" type="number" min="1" value="100">
     </div>
   </div>
   <div class="row">
     <div>
-      <label>Cible</label>
+      <label>Cible (aliment)</label>
       <input id="t" placeholder="ex: Spaghetti, cuit" list="t-dl">
       <datalist id="t-dl"></datalist>
     </div>
@@ -42,17 +61,53 @@ h1{margin-top:0}
   </div>
   <button id="go">Calculer</button>
   <pre id="out"></pre>
-</div>
+</section>
 
-<div class="card">
-  <h3>Photo de plan (OCR)</h3>
-  <input id="img" type="file" accept="image/*">
-  <button id="upload">Analyser</button>
-  <pre id="ocr"></pre>
-  <p style="font-size:14px;opacity:.8">Astuce: si l'OCR n'est pas installé sur le serveur, cette section renverra un message d'erreur. Le calcul direct fonctionne quand même.</p>
-</div>
+<!-- ALTERNATIVE REPAS COMPLET -->
+<section class="card" id="view-meal" style="display:none">
+  <h3>Alternative repas complet</h3>
+
+  <div class="card">
+    <h4>Plan actuel (jusqu’à 6 aliments)</h4>
+    <div id="meal-rows" class="grid-1"></div>
+    <button id="add-row" style="margin-top:6px">+ Ajouter une ligne</button>
+  </div>
+
+  <div class="card">
+    <h4>Envies (ingrédients cibles)</h4>
+    <label>Saisis des mots séparés par des virgules (ex: <span class="pill">chips</span> <span class="pill">yogourt grec</span> <span class="pill">fruit</span>)</label>
+    <input id="likes" placeholder="chips, yogourt grec, fruit">
+    <div class="foot">L’app reconnait des variantes (ex. “yogourt grec” ≈ “yogourt grec 0%”).</div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>Photo du plan (optionnel)</h4>
+      <input id="img" type="file" accept="image/*">
+      <button id="upload">Analyser la photo</button>
+      <pre id="ocr"></pre>
+      <div class="foot">Si l’OCR n’est pas activé côté serveur, un message l’indiquera. Ce bloc est optionnel.</div>
+    </div>
+
+    <div class="card">
+      <h4>Calcul</h4>
+      <button id="suggest">Proposer une recette équivalente</button>
+      <div id="tolerance" class="foot">Tolérances : <b>±10 kcal</b> et <b>±3 g protéines</b>.</div>
+      <pre id="suggest-out"></pre>
+    </div>
+  </div>
+</section>
 
 <script>
+// ---- UI Tabs ----
+const tabSimple = document.getElementById('tab-simple');
+const tabMeal = document.getElementById('tab-meal');
+const viewSimple = document.getElementById('view-simple');
+const viewMeal = document.getElementById('view-meal');
+tabSimple.onclick = () => { tabSimple.classList.add('active'); tabMeal.classList.remove('active'); viewSimple.style.display='block'; viewMeal.style.display='none'; };
+tabMeal.onclick = () => { tabMeal.classList.add('active'); tabSimple.classList.remove('active'); viewMeal.style.display='block'; viewSimple.style.display='none'; };
+
+// ---- Autocomplete helper ----
 async function suggest(el, dlid){
   const q=el.value.trim(); if(q.length<3) return;
   const r=await fetch('/search?q='+encodeURIComponent(q));
@@ -63,6 +118,7 @@ async function suggest(el, dlid){
 document.getElementById('s').addEventListener('input',e=>suggest(e.target,'s-dl'));
 document.getElementById('t').addEventListener('input',e=>suggest(e.target,'t-dl'));
 
+// ---- Simple equivalence ----
 document.getElementById('go').onclick=async ()=>{
   const body={source:s.value, grams:Number(g.value), target:t.value, mode:m.value};
   const r=await fetch('/equivalence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -70,11 +126,87 @@ document.getElementById('go').onclick=async ()=>{
   out.textContent = JSON.stringify(j, null, 2);
 };
 
+// ---- Meal rows (6) ----
+const mealRows = document.getElementById('meal-rows');
+function makeRow(i){
+  const wrap = document.createElement('div');
+  wrap.className='grid-3';
+  wrap.innerHTML = `
+    <input placeholder="Aliment #${i+1}" list="dl-${i}" id="name-${i}">
+    <datalist id="dl-${i}"></datalist>
+    <input type="number" min="0" placeholder="g" id="grams-${i}">
+    <button type="button" id="clear-${i}">×</button>
+  `;
+  mealRows.appendChild(wrap);
+  const nameEl = wrap.querySelector(`#name-${i}`);
+  const gramsEl = wrap.querySelector(`#grams-${i}`);
+  const dlid = `dl-${i}`;
+  nameEl.addEventListener('input', e => suggest(e.target, dlid));
+  wrap.querySelector(`#clear-${i}`).onclick = ()=>{ nameEl.value=''; gramsEl.value=''; document.getElementById(dlid).innerHTML=''; };
+}
+for(let i=0;i<6;i++) makeRow(i);
+document.getElementById('add-row').onclick = ()=> makeRow(document.querySelectorAll('.grid-3').length);
+
+// ---- OCR (optionnel) ----
 document.getElementById('upload').onclick=async ()=>{
   if(!img.files.length){ alert('Choisis une image'); return; }
   const fd=new FormData(); fd.append('file', img.files[0]);
   const r=await fetch('/upload-plan',{method:'POST',body:fd});
   const j=await r.json();
   ocr.textContent = JSON.stringify(j, null, 2);
+};
+
+// ---- Suggestion (iso kcal & prot avec tolérances) ----
+// Utilise /suggest-plan côté serveur (ajouté dans app.py)
+document.getElementById('suggest').onclick = async ()=>{
+  // Construire "current" à partir des 6 lignes
+  const current = [];
+  for(let i=0;i<document.querySelectorAll('.grid-3').length;i++){
+    const name = document.getElementById(`name-${i}`);
+    const grams = document.getElementById(`grams-${i}`);
+    if(name && name.value.trim() && grams && Number(grams.value)>0){
+      current.push({aliment: name.value.trim(), grams: Number(grams.value)});
+    }
+  }
+  if(current.length===0){ alert("Ajoute au moins 1 aliment dans le plan actuel."); return; }
+
+  // Likes -> liste de mots
+  const likesRaw = document.getElementById('likes').value || '';
+  const likes = likesRaw.split(',').map(x=>x.trim()).filter(Boolean);
+  if(likes.length===0){ alert("Ajoute au moins une envie (ex: chips, yogourt grec, fruit)."); return; }
+
+  const body = { current, likes, round_to: 5 };
+  const r = await fetch('/suggest-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j = await r.json();
+
+  // Affichage + check tolérances
+  const tolK = 10, tolP = 3;
+  let badge = '';
+  if(j.residual_diff){
+    const okK = Math.abs(j.residual_diff.kcal) <= tolK;
+    const okP = Math.abs(j.residual_diff.prot_g) <= tolP;
+    if(okK && okP) badge = '✅ Tolérance respectée (±10 kcal, ±3 g prot)';
+    else badge = '⚠️ Ajuste un peu les quantitées ou précise tes envies (ex. “yogourt grec 0%”).';
+  }
+
+  // Format lisible
+  const lines = [];
+  if(j.suggested_recipe){
+    lines.push('Recette proposée :');
+    j.suggested_recipe.forEach(it=>{
+      lines.push(`- ${it.aliment}: ${it.grams} g`);
+    });
+  }
+  if(j.final_totals){
+    lines.push('');
+    lines.push(`Totaux estimés: ${j.final_totals.kcal} kcal, Prot ${j.final_totals.prot_g} g`);
+  }
+  if(j.residual_diff){
+    lines.push(`Écart vs plan actuel: kcal ${j.residual_diff.kcal}, prot ${j.residual_diff.prot_g} g`);
+  }
+  lines.push('');
+  lines.push(badge);
+
+  document.getElementById('suggest-out').textContent = lines.join('\n') + '\n\n' + JSON.stringify(j, null, 2);
 };
 </script>
