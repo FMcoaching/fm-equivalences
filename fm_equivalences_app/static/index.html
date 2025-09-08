@@ -1,0 +1,80 @@
+
+<!doctype html><meta charset="utf-8">
+<title>FM Équivalences</title>
+<style>
+body{font:16px system-ui;margin:24px;max-width:820px}
+input,select,button{font:inherit;padding:8px;margin:6px 0}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.card{border:1px solid #eee;padding:16px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.06)}
+pre{background:#f8f8f8;padding:12px;border-radius:8px;overflow:auto}
+label{display:block;margin-top:8px}
+h1{margin-top:0}
+</style>
+
+<h1>Équivalences alimentaires (FM)</h1>
+
+<div class="card">
+  <h3>Calcul direct</h3>
+  <div class="row">
+    <div>
+      <label>Source</label>
+      <input id="s" placeholder="ex: Riz blanc à grains longs, cuit" list="s-dl">
+      <datalist id="s-dl"></datalist>
+    </div>
+    <div>
+      <label>Grammes</label>
+      <input id="g" type="number" value="100" min="1">
+    </div>
+  </div>
+  <div class="row">
+    <div>
+      <label>Cible</label>
+      <input id="t" placeholder="ex: Spaghetti, cuit" list="t-dl">
+      <datalist id="t-dl"></datalist>
+    </div>
+    <div>
+      <label>Mode</label>
+      <select id="m">
+        <option value="carbs">Iso-glucides</option>
+        <option value="kcal">Iso-kcal</option>
+      </select>
+    </div>
+  </div>
+  <button id="go">Calculer</button>
+  <pre id="out"></pre>
+</div>
+
+<div class="card">
+  <h3>Photo de plan (OCR)</h3>
+  <input id="img" type="file" accept="image/*">
+  <button id="upload">Analyser</button>
+  <pre id="ocr"></pre>
+  <p style="font-size:14px;opacity:.8">Astuce: si l'OCR n'est pas installé sur le serveur, cette section renverra un message d'erreur. Le calcul direct fonctionne quand même.</p>
+</div>
+
+<script>
+async function suggest(el, dlid){
+  const q=el.value.trim(); if(q.length<3) return;
+  const r=await fetch('/search?q='+encodeURIComponent(q));
+  const j=await r.json();
+  const dl=document.getElementById(dlid);
+  dl.innerHTML=j.results.map(x=>`<option value="${x}">`).join('');
+}
+document.getElementById('s').addEventListener('input',e=>suggest(e.target,'s-dl'));
+document.getElementById('t').addEventListener('input',e=>suggest(e.target,'t-dl'));
+
+document.getElementById('go').onclick=async ()=>{
+  const body={source:s.value, grams:Number(g.value), target:t.value, mode:m.value};
+  const r=await fetch('/equivalence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j=await r.json();
+  out.textContent = JSON.stringify(j, null, 2);
+};
+
+document.getElementById('upload').onclick=async ()=>{
+  if(!img.files.length){ alert('Choisis une image'); return; }
+  const fd=new FormData(); fd.append('file', img.files[0]);
+  const r=await fetch('/upload-plan',{method:'POST',body:fd});
+  const j=await r.json();
+  ocr.textContent = JSON.stringify(j, null, 2);
+};
+</script>
