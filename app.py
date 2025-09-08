@@ -3,6 +3,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
+from fastapi.responses import RedirectResponse
 import pandas as pd, difflib, io
 
 # Dependencies for OCR (optional)
@@ -78,3 +79,7 @@ def upload_plan(file: UploadFile = File(...)):
         return {"items": parsed, "ocr_text": raw_text}
     except Exception as e:
         return {"error": str(e)}
+        @app.get("/")
+def root():
+    return RedirectResponse(url="/static/index.html")
+
