@@ -3,6 +3,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse, JSONResponse
 import difflib
 
 from fm_equivalences import load_food_db, equivalent_portion  # on garde tes routes existantes
@@ -453,6 +455,11 @@ def _bounds_for(nm: str):
 
 @app.post("/suggest-plan")
 def suggest_plan(req: SuggestReq):
+    # s'assure que la base est chargée
+    lazy_load()
+    if LOAD_ERR:
+        raise HTTPException(status_code=500, detail=f"DB load failed: {LOAD_ERR}")
+
     try:
         # 1) Totaux du plan actuel
         cur_tot = totals_for_plan(req.current)
@@ -469,7 +476,6 @@ def suggest_plan(req: SuggestReq):
             if r is None:
                 continue
             p, k = _per_g(r)
-            # écarte les candidats sans prot ET sans kcal
             if abs(p) < 1e-9 and abs(k) < 1e-9:
                 continue
             names.append(nm)
@@ -478,14 +484,19 @@ def suggest_plan(req: SuggestReq):
             bounds.append(_bounds_for(nm))
 
         if len(P) < 2:
-            return {"error": "Pas assez de candidats valides extraits des envies.", "candidates_seen": cand}, 400
+            # envoie une erreur propre (422/400) au client
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "Pas assez de candidats valides depuis les envies.", "candidates_seen": cand}
+            )
 
-        # 3) Résoudre A x = b pour égaler EXACTEMENT prot & kcal (puis appliquer bornes)
+        # 3) Résoudre A x = b
         A = np.vstack([P, K])                                # 2 x n
         b = np.array([cur_tot["prot_g"], cur_tot["kcal"]])   # 2
 
         # point de départ = bornes basses
-        x = np.array([bounds[i][0] if bounds[i][0] is not None else 0.0 for i in range(len(names))], dtype=float)
+        x = np.array([bounds[i][0] if bounds[i][0] is not None else 0.0
+                      for i in range(len(names))], dtype=float)
         # retirer ce qu'on a déjà mis
         b2 = b - np.array([np.dot(P, x), np.dot(K, x)])
 
@@ -494,14 +505,13 @@ def suggest_plan(req: SuggestReq):
             if not active:
                 break
             A2 = A[:, active]
-            # moindres carrés sur transposée (2 x n_active)
             sol, *_ = np.linalg.lstsq(A2.T, b2, rcond=None)
             cand_x = x.copy()
             for j, i in enumerate(active):
                 cand_x[i] = x[i] + float(sol[j])
-            # applique bornes
+            # bornes
             violated = []
-            for i, nm in enumerate(names):
+            for i in range(len(names)):
                 lo, hi = bounds[i]
                 if cand_x[i] < lo:
                     cand_x[i] = lo; violated.append(i)
@@ -510,7 +520,7 @@ def suggest_plan(req: SuggestReq):
             if not violated:
                 x = cand_x
                 break
-            # fige les violés et retire leur contribution
+            # fige violés
             for i in set(violated):
                 dx = cand_x[i] - x[i]
                 b2 = b2 - np.array([P[i]*dx, K[i]*dx])
@@ -518,7 +528,7 @@ def suggest_plan(req: SuggestReq):
                 if i in active:
                     active.remove(i)
 
-        # 4) Arrondi + micro-ajustement toléré (±10 kcal, ±3 g prot)
+        # 4) Arrondi + micro-ajustements (±10 kcal / ±3 g prot)
         step = max(1, int(req.round_to))
         x = np.array([round(g/step)*step for g in x], dtype=float)
 
@@ -527,21 +537,21 @@ def suggest_plan(req: SuggestReq):
         diff = {"kcal": round(cur_tot["kcal"]-final["kcal"], 2),
                 "prot_g": round(cur_tot["prot_g"]-final["prot_g"], 2)}
 
-        # micro-ajustement si hors tolérances
         for _ in range(30):
             okK = abs(diff["kcal"]) <= 10
             okP = abs(diff["prot_g"]) <= 3
-            if okK and okP:
+            if okK && okP:
                 break
-            # choisit la variable la plus efficace sur la grandeur dominante
+            # ajuste l’item le plus efficace
             goal_k = abs(diff["kcal"]) >= abs(diff["prot_g"])
             coeffs = K if goal_k else P
             idx = int(np.argmax(np.abs(coeffs)))
             lo, hi = bounds[idx]
-            newg = x[idx] + (step if (diff["kcal"] > 0 if goal_k else diff["prot_g"] > 0) else -step)
+            move = step if (diff["kcal"] > 0 if goal_k else diff["prot_g"] > 0) else -step
+            newg = x[idx] + move
             if (hi is not None and newg > hi) or newg < lo:
-                # essaie l'autre sens
-                newg = x[idx] - (step if (diff["kcal"] > 0 if goal_k else diff["prot_g"] > 0) else -step)
+                # essaie l’autre sens
+                newg = x[idx] - move
                 if (hi is not None and newg > hi) or newg < lo:
                     break
             x[idx] = newg
@@ -558,7 +568,9 @@ def suggest_plan(req: SuggestReq):
             "final_totals": final,
             "residual_diff": diff
         }
-    except Exception as e:
-        # renvoie une erreur lisible plutôt qu'un 500 silencieux
-        return {"error": f"suggest-plan failed: {str(e)}"}, 400
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        # renvoie une erreur propre (pas de 500 silencieux)
+        raise HTTPException(status_code=422, detail={"error": f"suggest-plan failed: {str(e)}"})
