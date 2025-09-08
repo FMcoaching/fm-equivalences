@@ -1,4 +1,4 @@
-# app.py — version complète, robuste (Python 3.9 compatible)
+# app.py — version "likes only" (Python 3.9 compatible)
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +19,7 @@ def lazy_load():
     if db is not None or LOAD_ERR is not None:
         return
     try:
-        from fm_equivalences import load_food_db, equivalent_portion  # fonctions de ton module
+        from fm_equivalences import load_food_db, equivalent_portion  # tes fonctions
         DB = load_food_db("nutrient_values_clean.csv")  # CSV à la racine du repo
         foods = sorted(DB["Aliment"].dropna().unique().tolist())
         db = DB
@@ -135,7 +135,7 @@ def equivalence(req: EqReq):
     except Exception as e:
         raise HTTPException(status_code=422, detail={"error": str(e)})
 
-# ---------- Helpers LIKE & catégories ----------
+# ---------- LIKE_MAP (synonymes/variantes usuelles) ----------
 LIKE_MAP = {
     "chips": ["Croustilles", "Croustilles de maïs", "Chips"],
     "yogourt": ["Yogourt grec", "Yogourt, nature"],
@@ -152,107 +152,52 @@ LIKE_MAP = {
     "jus de pomme": ["Jus de pomme, non sucré"],
 }
 
-def get_macros_100(row):
-    def safe(col):
-        try:
-            v = float(row[col]); 
-            return 0.0 if v != v else v
-        except Exception:
-            return 0.0
-    return {"p": safe("protein_g_per_100g"),
-            "c": safe("carb_g_per_100g"),
-            "f": safe("fat_g_per_100g"),
-            "k": safe("kcal_per_100g"),
-            "fi": safe("fiber_g_per_100g")}
-
-def classify_by_macros(row) -> str:
-    m = get_macros_100(row)
-    p, c, f = m["p"], m["c"], m["f"]
-    if p >= 10 and p >= c and p >= f:   # dominant protéine
-        return "protein"
-    if f >= 10 and f > p and f >= c:    # très gras
-        return "fat"
-    if c >= 15 and c >= p and c >= f:   # dominant glucides
-        return "carb"
-    return "mixed"
-
-def find_in_foods(keys: List[str], foods: List[str], limit: int = 6) -> List[str]:
-    out: List[str] = []
-    low = [f.lower() for f in foods]
-    for key in keys:
-        k = key.lower().strip()
-        # contains
-        hits = [foods[i] for i, nm in enumerate(low) if k in nm]
-        for h in hits:
-            if h not in out:
-                out.append(h)
-        # fuzzy
-        close = difflib.get_close_matches(k, low, n=4, cutoff=0.6)
-        for c in close:
-            cand = foods[low.index(c)]
-            if cand not in out:
-                out.append(cand)
-        if len(out) >= limit:
-            break
-    return out[:limit]
-
-def choose_bucketed_candidates_from_likes(likes: List[str], foods: List[str], want: int = 3) -> List[str]:
-    # 1) collecte brute
-    raw: List[str] = []
-    for like in likes:
-        keys = LIKE_MAP.get(like.lower().strip(), [like])
-        raw.extend(find_in_foods(keys, foods, limit=6))
-    if not raw:
-        raw = find_in_foods(["Yogourt grec", "Pomme", "Spaghetti, cuit"], foods, limit=6)
-
-    # 2) classer
-    buckets = {"protein": [], "carb": [], "fat": [], "mixed": []}
-    seen = set()
-    for nm in raw:
-        if nm in seen:
-            continue
-        r = row_for(nm)
-        if r is None:
-            continue
-        cat = classify_by_macros(r)
-        buckets[cat].append(nm)
-        seen.add(nm)
-
-    # 3) garantir ≥1 protéine
-    chosen: List[str] = []
-    if buckets["protein"]:
-        chosen.append(buckets["protein"][0])
-    else:
-        for fb in ["Yogourt grec, nature, 0%", "Poulet, poitrine, sans peau, rôti", "Dinde hachée, extra maigre, émiéttée, sautée"]:
-            bm = best_match(fb)
-            if bm:
-                chosen.append(bm); break
-
-    # 4) compléter avec carb puis mixed/fat/protein
-    for cat in ["carb", "mixed", "fat", "protein"]:
-        for nm in buckets[cat]:
-            if nm not in chosen:
-                chosen.append(nm)
-            if len(chosen) >= want:
-                break
-        if len(chosen) >= want:
-            break
-
-    return chosen[:want]
-
+# ---------- Bornes par aliment (plausibles) ----------
 def bounds_for(nm: str) -> Tuple[float, Optional[float]]:
-    r = row_for(nm)
-    cat = classify_by_macros(r) if r is not None else "mixed"
-    if cat == "protein": return (90.0, 300.0)
-    if cat == "carb":    return (90.0, 250.0)
-    if cat == "fat":     return (10.0, 60.0)
-    return (50.0, 250.0)  # mixed
+    # seuils simples basés sur le type d'aliment
+    l = (nm or "").lower()
+    if "yogourt" in l or "boeuf" in l or "poulet" in l or "dinde" in l or "poisson" in l or "tofu" in l:
+        return (90.0, 300.0)     # protéines
+    if "pomme de terre" in l or "spaghetti" in l or "pâtes" in l or "riz" in l or "pain" in l or "avoine" in l:
+        return (90.0, 250.0)     # glucides
+    if "croustille" in l or "chips" in l or "huile" in l or "beurre" in l or "arachide" in l:
+        return (10.0, 60.0)      # gras/snacks denses
+    return (50.0, 250.0)         # par défaut
 
-# ---------- Suggestion de recette (multi-éléments fournis uniquement) ----------
+# ---------- Mapping strict "likes → candidats" ----------
+def map_likes_to_exact_candidates(likes: List[str], foods: List[str]) -> List[str]:
+    """Retourne 1 candidat par like (dans l'ordre), sans ajouter d'aliments non demandés.
+       - essaie d'abord LIKE_MAP (synonymes/variantes),
+       - sinon 'contains',
+       - sinon fuzzy (rapproché),
+       - si introuvable => ignoré (on validera ensuite).
+    """
+    results: List[str] = []
+    low = [f.lower() for f in foods]
+    for like in likes:
+        base = like.strip().lower()
+        keys = LIKE_MAP.get(base, [like])
+        picked = None
+        for key in keys:
+            k = key.lower().strip()
+            # contains
+            contains = [foods[i] for i, nm in enumerate(low) if k in nm]
+            if contains:
+                picked = contains[0]; break
+            # fuzzy
+            close = difflib.get_close_matches(k, low, n=1, cutoff=0.6)
+            if close:
+                picked = foods[low.index(close[0])]; break
+        if picked and picked not in results:
+            results.append(picked)
+        # sinon: on ignore ce like (on signalera plus bas)
+    return results
+
+# ---------- Suggestion de recette (UTILISE UNIQUEMENT les likes) ----------
 class SuggestReq(BaseModel):
-    # Ici, 'current' = uniquement les aliments que le client veut remplacer
+    # 'current' = uniquement les aliments à remplacer (ce que le client a entré)
     current: List[Dict[str, Any]]
-    likes:   List[str]          # ce qu’il veut manger à la place
+    likes:   List[str]          # ce qu’il veut manger à la place (2+ éléments)
     round_to: int = 5
 
 @app.post("/suggest-plan")
@@ -267,9 +212,38 @@ def suggest_plan(req: SuggestReq):
             raise HTTPException(status_code=422, detail={"error": "Aucun aliment fourni dans 'current'."})
         cur_tot = totals_for_plan(req.current)  # cibles ±10 kcal / ±3 g prot
 
-        # 2) Candidats depuis les envies (≥1 protéine garanti)
-        cand = choose_bucketed_candidates_from_likes(req.likes, FOODS, want=3)
+        # 2) Construire les candidats STRICTEMENT à partir des "likes"
+        if not req.likes:
+            raise HTTPException(status_code=422, detail={"error": "Aucune 'Envie' fournie."})
 
+        cand = map_likes_to_exact_candidates(req.likes, FOODS)
+
+        # validations
+        if len(cand) == 0:
+            raise HTTPException(status_code=422, detail={
+                "error": "Aucun des éléments saisis dans 'Envies' n'a été reconnu dans la base.",
+                "hint": "Essaye des libellés proches de l’autocomplétion (ex.: 'boeuf haché extra maigre', 'pomme de terre, bouillie')."
+            })
+        if len(cand) < 2:
+            raise HTTPException(status_code=422, detail={
+                "error": "Pour calculer une alternative, saisis au moins deux ingrédients dans 'Envies'.",
+                "hint": "Ex.: 'boeuf, patate' ou 'yogourt grec, fruit'."
+            })
+        # au moins une source protéique (évite 100% glucides)
+        has_protein = False
+        for nm in cand:
+            r = row_for(nm)
+            if r is not None:
+                p100 = float(r.get("protein_g_per_100g", 0) or 0)
+                if p100 >= 10:
+                    has_protein = True; break
+        if not has_protein:
+            raise HTTPException(status_code=422, detail={
+                "error": "Les 'Envies' ne contiennent aucune source de protéines.",
+                "hint": "Ajoute une protéine (ex.: 'yogourt grec', 'poulet', 'boeuf haché extra maigre')."
+            })
+
+        # 3) Prépare le système A x = b
         names: List[str] = []
         P: List[float] = []
         K: List[float] = []
@@ -279,7 +253,7 @@ def suggest_plan(req: SuggestReq):
             r = row_for(nm)
             if r is None:
                 continue
-            p_per_g, k_per_g = per_gram(r)  # prot/g, kcal/g
+            p_per_g, k_per_g = per_gram(r)
             if abs(p_per_g) < 1e-9 and abs(k_per_g) < 1e-9:
                 continue
             names.append(nm)
@@ -288,13 +262,15 @@ def suggest_plan(req: SuggestReq):
             B.append(bounds_for(nm))
 
         if len(P) < 2:
-            raise HTTPException(status_code=422, detail={"error": "Pas assez de candidats valides depuis les envies.", "candidates_seen": cand})
+            raise HTTPException(status_code=422, detail={
+                "error": "Pas assez de candidats valides depuis les envies.",
+                "candidates_seen": cand
+            })
 
-        # 3) Résoudre A x = b (iso-prot & iso-kcal) avec bornes
         A = np.vstack([P, K])                                # 2 x n
         b = np.array([cur_tot["prot_g"], cur_tot["kcal"]])   # 2
 
-        # point de départ = bornes basses
+        # 4) Résolution avec bornes simples
         x = np.array([B[i][0] if B[i][0] is not None else 0.0 for i in range(len(names))], dtype=float)
         b2 = b - np.array([np.dot(P, x), np.dot(K, x)])
 
@@ -307,7 +283,6 @@ def suggest_plan(req: SuggestReq):
             cand_x = x.copy()
             for j, i in enumerate(active):
                 cand_x[i] = x[i] + float(sol[j])
-            # bornes
             violated = []
             for i in range(len(names)):
                 lo, hi = B[i]
@@ -318,7 +293,7 @@ def suggest_plan(req: SuggestReq):
             if not violated:
                 x = cand_x
                 break
-            # fige violés et soustrait contribution
+            # fige violés et soustrait leur contribution
             for i in set(violated):
                 dx = cand_x[i] - x[i]
                 b2 = b2 - np.array([P[i]*dx, K[i]*dx])
@@ -326,7 +301,7 @@ def suggest_plan(req: SuggestReq):
                 if i in active:
                     active.remove(i)
 
-        # 4) Arrondi + micro-ajustements (±10 kcal / ±3 g prot)
+        # 5) Arrondi + micro-ajustements (±10 kcal / ±3 g prot)
         step = max(1, int(req.round_to))
         x = np.array([round(g/step)*step for g in x], dtype=float)
 
@@ -335,13 +310,13 @@ def suggest_plan(req: SuggestReq):
         diff = {"kcal": round(cur_tot["kcal"] - final["kcal"], 2),
                 "prot_g": round(cur_tot["prot_g"] - final["prot_g"], 2)}
 
-        # micro-ajustements si hors tolérances
+        # petite boucle de raffinement si hors tolérances
         for _ in range(30):
             okK = abs(diff["kcal"]) <= 10
             okP = abs(diff["prot_g"]) <= 3
             if okK and okP:
                 break
-            # cible grandeur dominante
+            # ajuste l'item le plus efficace pour la grandeur dominante
             goal_k = abs(diff["kcal"]) >= abs(diff["prot_g"])
             coeffs = K if goal_k else P
             idx = int(np.argmax(np.abs(coeffs)))
@@ -362,8 +337,8 @@ def suggest_plan(req: SuggestReq):
             "scope": "replace_only_these_items",
             "current_totals": cur_tot,
             "likes": req.likes,
-            "candidates": names,
-            "suggested_recipe": suggestion,
+            "candidates": names,              # correspond 1:1 aux likes reconnus
+            "suggested_recipe": suggestion,   # UNIQUEMENT les likes (avec grammes)
             "final_totals": final,
             "residual_diff": diff
         }
