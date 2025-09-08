@@ -137,106 +137,220 @@ def equivalence(req: EqReq):
         return {"error": str(e)}
 
 
-# --------- NOUVEAU: comparer 2 plans, iso-protéines ET iso-calories ----------
+# --------- NOUVEAU v2: comparer 2 plans, iso-protéines ET iso-calories avec bornes ----------
+import numpy as np
+
 class PlanItem(BaseModel):
     aliment: str
     grams: float
 
+class AdjustableItem(BaseModel):
+    name: str
+    min_g: float = 0.0
+    max_g: float | None = None  # None = pas de maximum
+
 class CompareReq(BaseModel):
     current: List[PlanItem]
     target: List[PlanItem]
-    adjustable: Optional[List[str]] = None  # optionnel: 2 noms à ajuster
-    round_to: int = 5  # pas d'arrondi des grammes suggérés
+    adjustables: Optional[List[AdjustableItem]] = None  # 2 ou 3 recommandés
+    round_to: int = 5  # arrondi final des grammes
+    priority: str = "kcal"  # "kcal" ou "protein" pour le micro-ajustement final
+
+def _p_k_per_g(row):
+    return (
+        float(row["protein_g_per_100g"]) / 100.0,
+        float(row["kcal_per_100g"]) / 100.0,
+    )
+
+def _clip(v, lo, hi):
+    if hi is None: return max(lo, v)
+    return min(max(lo, v), hi)
 
 @app.post("/compare-plans")
 def compare_plans(req: CompareReq):
-    # Totaux actuels vs cibles initiales
+    lazy_load()
+    if LOAD_ERR:
+        return JSONResponse({"error": LOAD_ERR}, status_code=500)
+
+    # 1) Totaux actuel vs cible initiale
     cur_list = [it.dict() for it in req.current]
     tgt_list = [it.dict() for it in req.target]
     cur_tot = totals_for_plan(cur_list)
     tgt_tot = totals_for_plan(tgt_list)
 
-    # Deltas à combler (prot et kcal EXACTS)
+    # 2) Besoin à combler (exact sur prot + kcal)
     dp = round(cur_tot["prot_g"] - tgt_tot["prot_g"], 6)
     dk = round(cur_tot["kcal"]  - tgt_tot["kcal"],  6)
 
-    # Choix des 2 aliments à ajuster
-    if req.adjustable and len(req.adjustable) >= 2:
-        # Utiliser exactement les deux fournis par le coach/client
-        a1_name = best_match(req.adjustable[0])
-        a2_name = best_match(req.adjustable[1])
-        if not a1_name or not a2_name:
-            return {"error": "Impossible de trouver un des aliments 'adjustable' dans la base."}
-        # trouver grams actuels dans target (0 si absent)
-        def grams_in_target(nm):
-            for it in tgt_list:
-                m = best_match(it["aliment"])
-                if m == nm:
-                    return float(it["grams"])
-            return 0.0
-        g1 = grams_in_target(a1_name)
-        g2 = grams_in_target(a2_name)
-        r1 = row_for(a1_name); r2 = row_for(a2_name)
-        p1k1 = per_gram(r1); p2k2 = per_gram(r2)
-        sol = solve_2x2(p1k1["p"], p2k2["p"], p1k1["k"], p2k2["k"], dp, dk)
-        if sol is None:
-            return {"error": "Conditions incompatibles avec les 2 aliments choisis (ratios très proches). Choisissez un aliment riche en protéines et un autre riche en énergie."}
-        dx, dy = sol
-        new_g1 = g1 + dx
-        new_g2 = g2 + dy
-        # arrondi pratique
-        rt = max(1, int(req.round_to))
-        new_g1 = round(new_g1 / rt) * rt
-        new_g2 = round(new_g2 / rt) * rt
-
-        # reconstruire un plan ajusté (les autres aliments identiques)
-        adjusted = []
-        used = set()
-        for it in tgt_list:
-            m = best_match(it["aliment"])
-            if m == a1_name and m not in used:
-                adjusted.append({"aliment": a1_name, "grams": max(0.0, new_g1)})
-                used.add(m)
-            elif m == a2_name and m not in used:
-                adjusted.append({"aliment": a2_name, "grams": max(0.0, new_g2)})
-                used.add(m)
-            else:
-                adjusted.append({"aliment": it["aliment"], "grams": it["grams"]})
-        # si un des ajustables était absent au départ, on l'ajoute
-        if a1_name not in [best_match(x["aliment"]) for x in tgt_list]:
-            adjusted.append({"aliment": a1_name, "grams": max(0.0, new_g1)})
-        if a2_name not in [best_match(x["aliment"]) for x in tgt_list]:
-            adjusted.append({"aliment": a2_name, "grams": max(0.0, new_g2)})
-
-    else:
-        # Auto-pick: 1 aliment très protéiné + 1 très énergétique
+    # 3) Préparer les ajustables
+    #    - si l'utilisateur n'en donne pas, auto-pick (2 éléments très différents)
+    if not req.adjustables or len(req.adjustables) < 2:
         picked = pick_adjustables(tgt_list)
         if picked is None:
-            return {"error": "Plan cible insuffisant pour ajustement (il faut au moins 2 aliments reconnus)."}
-        (a1_name, g1, r1, p1, k1, rratio1), (a2_name, g2, r2, p2, k2, rratio2) = picked
-        sol = solve_2x2(p1, p2, k1, k2, dp, dk)
-        if sol is None:
-            return {"error": "Aliments cibles choisis automatiquement non compatibles (ratios trop proches). Spécifiez 2 'adjustable' différents (ex: un très protéiné + un énergétique)."}
-        dx, dy = sol
-        rt = max(1, int(req.round_to))
-        new_g1 = round((g1 + dx) / rt) * rt
-        new_g2 = round((g2 + dy) / rt) * rt
+            return {"error": "Plan cible insuffisant pour ajustement (il faut ≥2 aliments reconnus)."}
+        (a1_name, g1, r1, p1, k1, _), (a2_name, g2, r2, p2, k2, _) = picked
+        adjustables = [
+            AdjustableItem(name=a1_name, min_g=0.0, max_g=None),
+            AdjustableItem(name=a2_name, min_g=0.0, max_g=None),
+        ]
+    else:
+        adjustables = req.adjustables
 
-        # reconstruire le plan ajusté
-        adjusted = []
-        used = set()
+    # 4) Construire vecteur de départ (grammes initiaux des ajustables)
+    names = []
+    start = []
+    bounds = []
+    pk = []  # (p_per_g, k_per_g)
+    for ad in adjustables:
+        nm = best_match(ad.name)
+        if not nm:
+            return {"error": f"Aliment non trouvé: {ad.name}"}
+        names.append(nm)
+        # grammes actuels dans target (0 si absent)
+        g0 = 0.0
         for it in tgt_list:
-            m = best_match(it["aliment"])
-            if m == a1_name and m not in used:
-                adjusted.append({"aliment": a1_name, "grams": max(0.0, new_g1)})
-                used.add(m)
-            elif m == a2_name and m not in used:
-                adjusted.append({"aliment": a2_name, "grams": max(0.0, new_g2)})
-                used.add(m)
-            else:
-                adjusted.append({"aliment": it["aliment"], "grams": it["grams"]})
+            if best_match(it["aliment"]) == nm:
+                g0 = float(it["grams"]); break
+        r = row_for(nm)
+        if r is None:
+            return {"error": f"Aliment non trouvé dans la base: {nm}"}
+        p, k = _p_k_per_g(r)
+        pk.append((p, k))
+        lo = float(ad.min_g)
+        hi = None if ad.max_g is None else float(ad.max_g)
+        # si g0 < min_g, on part au min
+        g0 = max(g0, lo)
+        start.append(g0)
+        bounds.append((lo, hi))
 
-    # Totaux finaux (après ajustement)
+    start = np.array(start, dtype=float)
+    P = np.array([p for p, _ in pk], dtype=float)
+    K = np.array([k for _, k in pk], dtype=float)
+
+    # 5) Construire le système A x = b sur les "delta grams"
+    # A: 2 x n, b: 2 x 1
+    A = np.vstack([P, K])         # 2 x n
+    b = np.array([dp, dk])        # 2
+
+    # On fait des itérations: solve -> appliquer bornes -> retirer vars saturées -> re-solve
+    active = np.ones(len(start), dtype=bool)
+    x = np.zeros_like(start)
+
+    def solve_active(A, b, active_mask):
+        A2 = A[:, active_mask]
+        # cas n_active == 1: impossible d'égaliser 2 équations -> approximation (lstsq)
+        if A2.shape[1] == 0:
+            return None
+        # moindres carrés
+        sol, *_ = np.linalg.lstsq(A2.T, b, rcond=None)  # (n_active, ) en résolvant sur transpose
+        return sol
+
+    # boucle max 5 itérations
+    for _ in range(5):
+        if active.sum() == 0:
+            break
+        sol = solve_active(A, b, active)
+        if sol is None:
+            break
+        x[active] = sol
+        cand = start + x
+        # appliquer bornes
+        violated = np.zeros_like(active)
+        for i, (lo, hi) in enumerate(bounds):
+            if not active[i]: 
+                continue
+            if cand[i] < lo - 1e-9:
+                cand[i] = lo
+                violated[i] = True
+            if hi is not None and cand[i] > hi + 1e-9:
+                cand[i] = hi
+                violated[i] = True
+        if not violated.any():
+            start = cand
+            break
+        # fixer les variables violées et ré-estimer pour les restantes
+        for i in range(len(active)):
+            if violated[i]:
+                active[i] = False
+                # Soustraire la contribution fixée de b
+                fix_delta = cand[i] - start[i]
+                b = b - np.array([P[i]*fix_delta, K[i]*fix_delta])
+                start[i] = cand[i]
+        x[:] = 0.0
+
+    # 6) Arrondi puis micro-ajustement pour retomber pile
+    step = max(1, int(req.round_to))
+    rounded = np.array([round(g/step)*step for g in start], dtype=float)
+
+    # recalcul du delta total obtenu
+    delta_p = float(np.dot(P, rounded - np.array([g for g in rounded], dtype=float)))  # placeholder
+    # Recalcule correctement: delta = rounded - (grammes initiaux AVANT ajustement)
+    # => il faut re-construire grams initiaux "target"
+    target_grams_map = {}
+    for it in tgt_list:
+        m = best_match(it["aliment"])
+        target_grams_map[m] = float(it["grams"])
+    deltas = []
+    for i, nm in enumerate(names):
+        g0 = target_grams_map.get(nm, 0.0)
+        deltas.append(rounded[i] - g0)
+    deltas = np.array(deltas, dtype=float)
+
+    delta_p = float(np.dot(P, deltas))
+    delta_k = float(np.dot(K, deltas))
+
+    # résidus après arrondi
+    rp = dp - delta_p
+    rk = dk - delta_k
+
+    # petit ajustement glouton: on choisit la variable au ratio le plus pertinent
+    def try_nudge(var_idx, sign):
+        new = rounded.copy()
+        new[var_idx] = _clip(new[var_idx] + sign*step, bounds[var_idx][0], bounds[var_idx][1])
+        return new
+
+    # on essaye 30 coups max
+    for _ in range(30):
+        if abs(rp) < 0.01 and abs(rk) < 0.5:  # tolérances serrées
+            break
+        # priorité d'ajustement
+        goal = "k" if req.priority == "kcal" else "p"
+        # choisir la var qui modifie le plus la grandeur prioritaire
+        idx = int(np.argmax(K if goal=="k" else P))
+        # déterminer le signe à appliquer
+        coeff = (K[idx] if goal=="k" else P[idx])
+        if abs(coeff) < 1e-9:
+            break
+        sign = 1 if ((rk if goal=="k" else rp) > 0) else -1
+        new = try_nudge(idx, sign)
+        # recalcul rp, rk
+        new_deltas = new - np.array([target_grams_map.get(nm, 0.0) for nm in names], dtype=float)
+        new_rp = dp - float(np.dot(P, new_deltas))
+        new_rk = dk - float(np.dot(K, new_deltas))
+        # si on est mieux, on garde
+        if abs(new_rp) + abs(new_rk) < abs(rp) + abs(rk):
+            rounded = new
+            rp, rk = new_rp, new_rk
+        else:
+            break
+
+    # 7) Reconstruire le plan ajusté
+    adjusted = []
+    used = set()
+    # réinjecte grammes arrondis pour les ajustables
+    for it in tgt_list:
+        m = best_match(it["aliment"])
+        if m in names and m not in used:
+            i = names.index(m)
+            adjusted.append({"aliment": m, "grams": float(rounded[i])})
+            used.add(m)
+        else:
+            adjusted.append({"aliment": it["aliment"], "grams": it["grams"]})
+    # si un adjustable n'était pas présent avant, on l'ajoute
+    for i, nm in enumerate(names):
+        if nm not in [best_match(x["aliment"]) for x in tgt_list]:
+            adjusted.append({"aliment": nm, "grams": float(rounded[i])})
+
     final_tot = totals_for_plan(adjusted)
     diffs = {
         "kcal": round(cur_tot["kcal"] - final_tot["kcal"], 2),
@@ -244,12 +358,12 @@ def compare_plans(req: CompareReq):
         "carb_g": round(cur_tot["carb_g"] - final_tot["carb_g"], 2),
         "fat_g":  round(cur_tot["fat_g"]  - final_tot["fat_g"],  2),
     }
-
     return {
         "current_totals": cur_tot,
         "initial_target_totals": tgt_tot,
         "needed_diff": {"kcal": dk, "prot_g": dp},
+        "adjusted_items": [{"name": n, "final_grams": float(rounded[i]), "bounds": bounds[i]} for i, n in enumerate(names)],
         "adjusted_plan": adjusted,
         "final_totals": final_tot,
-        "residual_diff": diffs,  # devrait être (0,0,*,*) à l'arrondi près pour kcal/protéines
+        "residual_diff": diffs
     }
