@@ -246,7 +246,7 @@ def suggest_plan(req: SuggestReq):
                 break
             A2 = A[:, active]
             # moindres carrés
-            sol, *_ = np.linalg.lstsq(A2.T, b2, rcond=None)
+            sol, *_ = np.linalg.lstsq(A2, b2, rcond=None)
             cand_x = x.copy()
             for j, i in enumerate(active):
                 cand_x[i] = x[i] + float(sol[j])
