@@ -156,70 +156,56 @@ document.getElementById('upload').onclick=async ()=>{
   ocr.textContent = JSON.stringify(j, null, 2);
 };
 
-<script>
-// ... garde le reste inchangé au-dessus ...
-
 // ---- Suggestion (iso kcal & prot avec tolérances) ----
-async function fetchJSON(url, opts) {
-  const r = await fetch(url, opts);
-  let bodyText = await r.text();
-  try { bodyText = JSON.parse(bodyText); } catch { /* garde le texte brut */ }
-  if (!r.ok) {
-    throw new Error(typeof bodyText === 'string' ? bodyText : (bodyText.detail || JSON.stringify(bodyText)));
-  }
-  return bodyText;
-}
-
 document.getElementById('suggest').onclick = async ()=>{
-  const outEl = document.getElementById('suggest-out');
-  outEl.textContent = 'Calcul en cours...';
-  try {
-    // Construire "current" à partir des lignes
-    const rows = document.querySelectorAll('.grid-3');
-    const current = [];
-    for (let i=0;i<rows.length;i++){
-      const n = document.getElementById(`name-${i}`);
-      const g = document.getElementById(`grams-${i}`);
-      if (n && n.value.trim() && g && Number(g.value)>0) {
-        current.push({ aliment: n.value.trim(), grams: Number(g.value) });
-      }
+  // Construire "current" à partir des 6 lignes
+  const current = [];
+  for(let i=0;i<document.querySelectorAll('.grid-3').length;i++){
+    const name = document.getElementById(`name-${i}`);
+    const grams = document.getElementById(`grams-${i}`);
+    if(name && name.value.trim() && grams && Number(grams.value)>0){
+      current.push({aliment: name.value.trim(), grams: Number(grams.value)});
     }
-    if (current.length===0) throw new Error("Ajoute au moins 1 aliment dans le plan actuel.");
-
-    // Likes
-    const likesRaw = document.getElementById('likes').value || '';
-    const likes = likesRaw.split(',').map(x=>x.trim()).filter(Boolean);
-    if (likes.length===0) throw new Error("Ajoute au moins une envie (ex: chips, yogourt grec, fruit).");
-
-    // Appel API
-    const body = { current, likes, round_to: 5 };
-    const j = await fetchJSON('/suggest-plan', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(body)
-    });
-
-    // Tolérances
-    const tolK = 10, tolP = 3;
-    const okK = j.residual_diff && Math.abs(j.residual_diff.kcal) <= tolK;
-    const okP = j.residual_diff && Math.abs(j.residual_diff.prot_g) <= tolP;
-    const badge = (okK && okP)
-      ? '✅ Tolérance respectée (±10 kcal, ±3 g prot)'
-      : '⚠️ Ajuster légèrement les quantités ou préciser les envies (ex.: “yogourt grec 0%”).';
-
-    // Affichage lisible
-    const lines = [];
-    if (j.suggested_recipe) {
-      lines.push('Recette proposée :');
-      j.suggested_recipe.forEach(it => lines.push(`- ${it.aliment}: ${it.grams} g`));
-    }
-    if (j.final_totals) lines.push(`\nTotaux: ${j.final_totals.kcal} kcal, Prot ${j.final_totals.prot_g} g`);
-    if (j.residual_diff) lines.push(`Écart: kcal ${j.residual_diff.kcal}, prot ${j.residual_diff.prot_g} g`);
-    lines.push('\n' + badge);
-
-    outEl.textContent = lines.join('\n') + '\n\n' + JSON.stringify(j, null, 2);
-  } catch (err) {
-    outEl.textContent = '❌ Erreur: ' + (err.message || err);
   }
+  if(current.length===0){ alert("Ajoute au moins 1 aliment dans le plan actuel."); return; }
+
+  // Likes -> liste de mots
+  const likesRaw = document.getElementById('likes').value || '';
+  const likes = likesRaw.split(',').map(x=>x.trim()).filter(Boolean);
+  if(likes.length===0){ alert("Ajoute au moins une envie (ex: chips, yogourt grec, fruit)."); return; }
+
+  const body = { current, likes, round_to: 5 };
+  const r = await fetch('/suggest-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const j = await r.json();
+
+  // Affichage + check tolérances
+  const tolK = 10, tolP = 3;
+  let badge = '';
+  if(j.residual_diff){
+    const okK = Math.abs(j.residual_diff.kcal) <= tolK;
+    const okP = Math.abs(j.residual_diff.prot_g) <= tolP;
+    if(okK && okP) badge = '✅ Tolérance respectée (±10 kcal, ±3 g prot)';
+    else badge = '⚠️ Ajuste un peu les quantitées ou précise tes envies (ex. “yogourt grec 0%”).';
+  }
+
+  // Format lisible
+  const lines = [];
+  if(j.suggested_recipe){
+    lines.push('Recette proposée :');
+    j.suggested_recipe.forEach(it=>{
+      lines.push(`- ${it.aliment}: ${it.grams} g`);
+    });
+  }
+  if(j.final_totals){
+    lines.push('');
+    lines.push(`Totaux estimés: ${j.final_totals.kcal} kcal, Prot ${j.final_totals.prot_g} g`);
+  }
+  if(j.residual_diff){
+    lines.push(`Écart vs plan actuel: kcal ${j.residual_diff.kcal}, prot ${j.residual_diff.prot_g} g`);
+  }
+  lines.push('');
+  lines.push(badge);
+
+  document.getElementById('suggest-out').textContent = lines.join('\n') + '\n\n' + JSON.stringify(j, null, 2);
 };
 </script>
