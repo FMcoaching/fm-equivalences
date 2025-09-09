@@ -70,7 +70,7 @@ def totals_for_plan(items: List[Dict[str, Any]]) -> Dict[str, float]:
     t = {"kcal": 0.0, "prot_g": 0.0, "carb_g": 0.0, "fat_g": 0.0, "fiber_g": 0.0}
     for it in items:
         r = row_for(it.get("aliment", ""))
-        if r is None: 
+        if r is None:
             continue
         g = float(it.get("grams", 0) or 0)
         m = macros_for_grams(r, g)
@@ -183,11 +183,13 @@ def map_likes_to_exact_candidates(likes: List[str], foods: List[str]) -> List[st
             # contains
             contains = [foods[i] for i, nm in enumerate(low) if k in nm]
             if contains:
-                picked = contains[0]; break
+                picked = contains[0]
+                break
             # fuzzy
             close = difflib.get_close_matches(k, low, n=1, cutoff=0.6)
             if close:
-                picked = foods[low.index(close[0])]; break
+                picked = foods[low.index(close[0])]
+                break
         if picked and picked not in results:
             results.append(picked)
         # sinon: on ignore ce like (on signalera plus bas)
@@ -236,7 +238,8 @@ def suggest_plan(req: SuggestReq):
             if r is not None:
                 p100 = float(r.get("protein_g_per_100g", 0) or 0)
                 if p100 >= 10:
-                    has_protein = True; break
+                    has_protein = True
+                    break
         if not has_protein:
             raise HTTPException(status_code=422, detail={
                 "error": "Les 'Envies' ne contiennent aucune source de protéines.",
@@ -244,13 +247,12 @@ def suggest_plan(req: SuggestReq):
             })
 
         # 3) Prépare le système A x = b
-       names: List[str] = []
-P: List[float] = []   # prot/g
-K: List[float] = []   # kcal/g
-C: List[float] = []   # carb/g   <-- AJOUT
-F: List[float] = []   # fat/g    <-- AJOUT
-B: List[Tuple[float, Optional[float]]] = []
-
+        names: List[str] = []
+        P: List[float] = []   # prot/g
+        K: List[float] = []   # kcal/g
+        C: List[float] = []   # carb/g
+        F: List[float] = []   # fat/g
+        B: List[Tuple[float, Optional[float]]] = []
 
         for nm in cand:
             r = row_for(nm)
@@ -263,9 +265,9 @@ B: List[Tuple[float, Optional[float]]] = []
             P.append(p_per_g)
             K.append(k_per_g)
             c_per_g = float(r.get("carb_g_per_100g", 0) or 0) / 100.0
-f_per_g = float(r.get("fat_g_per_100g", 0) or 0) / 100.0
-C.append(c_per_g)
-F.append(f_per_g)
+            f_per_g = float(r.get("fat_g_per_100g", 0) or 0) / 100.0
+            C.append(c_per_g)
+            F.append(f_per_g)
             B.append(bounds_for(nm))
 
         if len(P) < 2:
@@ -274,7 +276,7 @@ F.append(f_per_g)
                 "candidates_seen": cand
             })
 
-        A = np.vstack([P, K])                                # 2 x n
+        A = np.vstack([P, K])                                # 2 x n (équations prot & kcal)
         b = np.array([cur_tot["prot_g"], cur_tot["kcal"]])   # 2
 
         # 4) Résolution avec bornes simples
@@ -308,76 +310,68 @@ F.append(f_per_g)
                 if i in active:
                     active.remove(i)
 
-        # 5) Arrondi + micro-ajustements (±10 kcal / ±3 g prot)
+        # 5) Arrondi + micro-ajustements (±10 kcal / ±3 g prot / ±5 g carb / ±5 g fat)
         step = max(1, int(req.round_to))
         x = np.array([round(g/step)*step for g in x], dtype=float)
 
         suggestion = [{"aliment": names[i], "grams": float(x[i])} for i in range(len(names))]
         final = totals_for_plan(suggestion)
-       diff = {
-    "kcal":   round(cur_tot["kcal"]   - final["kcal"],   2),
-    "prot_g": round(cur_tot["prot_g"] - final["prot_g"], 2),
-    "carb_g": round(cur_tot["carb_g"] - final["carb_g"], 2),
-    "fat_g":  round(cur_tot["fat_g"]  - final["fat_g"],  2),
-}
+        diff = {
+            "kcal":   round(cur_tot["kcal"]   - final["kcal"],   2),
+            "prot_g": round(cur_tot["prot_g"] - final["prot_g"], 2),
+            "carb_g": round(cur_tot["carb_g"] - final["carb_g"], 2),
+            "fat_g":  round(cur_tot["fat_g"]  - final["fat_g"],  2),
+        }
 
         # petite boucle de raffinement si hors tolérances
         for _ in range(30):
-           okK = abs(diff["kcal"]) <= 10
-okP = abs(diff["prot_g"]) <= 3
-okC = abs(cur_tot["carb_g"] - final["carb_g"]) <= 5
-okF = abs(cur_tot["fat_g"] - final["fat_g"]) <= 5
-if okK and okP and okC and okF:
-    break
+            okK = abs(diff["kcal"])   <= 10
+            okP = abs(diff["prot_g"]) <= 3
+            okC = abs(diff["carb_g"]) <= 5
+            okF = abs(diff["fat_g"])  <= 5
+            if okK and okP and okC and okF:
+                break
 
- # Choisir la dimension avec l'écart relatif le plus grand
-residuals = {
-    "kcal":   abs(diff["kcal"])   / 10.0,  # normalise par la tolérance
-    "prot_g": abs(diff["prot_g"]) / 3.0,
-    "carb_g": abs(diff["carb_g"]) / 5.0,
-    "fat_g":  abs(diff["fat_g"])  / 5.0,
-}
-# clé avec la plus grande violation
-key = max(residuals, key=residuals.get)
+            # Choisir la dimension la plus violée (normalisée par sa tolérance)
+            residuals = {
+                "kcal":   abs(diff["kcal"])   / 10.0,
+                "prot_g": abs(diff["prot_g"]) / 3.0,
+                "carb_g": abs(diff["carb_g"]) / 5.0,
+                "fat_g":  abs(diff["fat_g"])  / 5.0,
+            }
+            key = max(residuals, key=residuals.get)
 
-# Coefficients par gramme associés à la dimension choisie
-coeff_map = {
-    "kcal":   K,
-    "prot_g": P,
-    "carb_g": C,
-    "fat_g":  F,
-}
-coeffs = coeff_map[key]
+            # Coefficients par gramme associés à la dimension choisie
+            coeff_map = {"kcal": K, "prot_g": P, "carb_g": C, "fat_g": F}
+            coeffs = coeff_map[key]
 
-# Signe du mouvement (réduit l'écart dans la dimension 'key')
-need_positive = (diff[key] > 0)   # il faut augmenter la dimension si diff>0, sinon diminuer
-move = step if need_positive else -step
+            # Signe du mouvement (réduit l'écart dans la dimension 'key')
+            need_positive = (diff[key] > 0)  # diff > 0 => il faut augmenter cette dimension
+            move = step if need_positive else -step
 
-# Choisir l'ingrédient le plus "efficace" pour cette dimension
-idx = int(np.argmax(np.abs(coeffs)))
-lo, hi = B[idx]
-newg = x[idx] + move
+            # Choisir l'ingrédient le plus "efficace" sur cette dimension
+            idx = int(np.argmax(np.abs(coeffs)))
+            lo, hi = B[idx]
+            newg = x[idx] + move
 
-# Respect des bornes
-if (hi is not None and newg > hi) or newg < lo:
-    newg = x[idx] - move
-    if (hi is not None and newg > hi) or newg < lo:
-        break
+            # Respect des bornes
+            if (hi is not None and newg > hi) or newg < lo:
+                newg = x[idx] - move
+                if (hi is not None and newg > hi) or newg < lo:
+                    break
 
-# Appliquer
-x[idx] = newg
-suggestion[idx]["grams"] = float(newg)
+            # Appliquer
+            x[idx] = newg
+            suggestion[idx]["grams"] = float(newg)
 
-# Recalculer les totaux & écarts
-final = totals_for_plan(suggestion)
-diff = {
-    "kcal":   round(cur_tot["kcal"]   - final["kcal"],   2),
-    "prot_g": round(cur_tot["prot_g"] - final["prot_g"], 2),
-    "carb_g": round(cur_tot["carb_g"] - final["carb_g"], 2),
-    "fat_g":  round(cur_tot["fat_g"]  - final["fat_g"],  2),
-
-}
-
+            # Recalculer les totaux & écarts
+            final = totals_for_plan(suggestion)
+            diff = {
+                "kcal":   round(cur_tot["kcal"]   - final["kcal"],   2),
+                "prot_g": round(cur_tot["prot_g"] - final["prot_g"], 2),
+                "carb_g": round(cur_tot["carb_g"] - final["carb_g"], 2),
+                "fat_g":  round(cur_tot["fat_g"]  - final["fat_g"],  2),
+            }
 
         return {
             "scope": "replace_only_these_items",
