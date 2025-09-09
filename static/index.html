@@ -1,4 +1,5 @@
-<!doctype html><meta charset="utf-8">
+<!doctype html>
+<meta charset="utf-8">
 <title>FM Équivalences</title>
 <style>
   :root{--fg:#111;--muted:#666;--bg:#fff;--card:#fff;--border:#eaeaea}
@@ -6,7 +7,7 @@
   h1{margin:0 0 8px 0}
   .muted{color:var(--muted);font-size:14px}
   .tabs{display:flex;gap:10px;margin:18px 0}
-  .tab{padding:10px 14px;border:1px solid var(--border);border-radius:12px;cursor:pointer;background:#fafafa}
+  .tab{padding:10px 14px;border:1px solid var(--border);border-radius:12px;cursor:pointer;background:#fafafa;user-select:none}
   .tab.active{background:#fff;border-color:#d9d9d9;box-shadow:0 2px 6px rgba(0,0,0,.06)}
   .card{border:1px solid var(--border);border-radius:14px;padding:16px;margin:10px 0;box-shadow:0 2px 6px rgba(0,0,0,.06);background:var(--card)}
   label{display:block;margin:6px 0 4px}
@@ -19,8 +20,8 @@
   .grid-1{display:grid;grid-template-columns:1fr;gap:10px}
   .pill{display:inline-block;padding:2px 8px;border:1px solid var(--border);border-radius:999px;font-size:12px;margin-right:6px}
   pre{background:#f8f8f8;padding:12px;border-radius:10px;overflow:auto}
-  .ok{color:#0a7a2f}.warn{color:#b55b00}.err{color:#b00020}
   .foot{font-size:12px;color:#777;margin-top:8px}
+  .ok{color:#0a7a2f}.warn{color:#b55b00}.err{color:#b00020}
 </style>
 
 <h1>Équivalences alimentaires (FM)</h1>
@@ -117,6 +118,47 @@
 </section>
 
 <script>
+  // ---- UI Tabs ----
+  const tabSimple = document.getElementById('tab-simple');
+  const tabMeal   = document.getElementById('tab-meal');
+  const viewSimple = document.getElementById('view-simple');
+  const viewMeal   = document.getElementById('view-meal');
+
+  function showSimple(){
+    tabSimple.classList.add('active');
+    tabMeal.classList.remove('active');
+    viewSimple.style.display = 'block';
+    viewMeal.style.display   = 'none';
+    if (location.hash !== '#simple') history.replaceState(null,'','#simple');
+  }
+  function showMeal(){
+    tabMeal.classList.add('active');
+    tabSimple.classList.remove('active');
+    viewMeal.style.display   = 'block';
+    viewSimple.style.display = 'none';
+    if (location.hash !== '#meal') history.replaceState(null,'','#meal');
+  }
+  tabSimple?.addEventListener('click', showSimple);
+  tabMeal?.addEventListener('click', showMeal);
+  if (location.hash === '#meal') { showMeal(); } else { showSimple(); }
+
+  // ---- Autocomplete helper ----
+  async function suggest(el, dlid){
+    const q=el.value.trim(); if(q.length<3) return;
+    const r=await fetch('/search?q='+encodeURIComponent(q));
+    const j=await r.json();
+    const dl=document.getElementById(dlid);
+    dl.innerHTML=j.results.map(x=>`<option value="${x}">`).join('');
+  }
+
+  // ---- Simple equivalence ----
+  document.getElementById('go').onclick=async ()=>{
+    const body={source:s.value, grams:Number(g.value), target:t.value, mode:m.value};
+    const r=await fetch('/equivalence',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const j=await r.json();
+    out.textContent = JSON.stringify(j, null, 2);
+  };
+
   // --- helpers pour les lignes d'aliments par macro ---
   function addFoodRow(containerId){
     const cont = document.getElementById(containerId);
@@ -136,7 +178,7 @@
     wrap.querySelector('button').onclick = ()=> cont.removeChild(wrap);
   }
 
-  // Boutons + initialisation: on crée 1 champ par macro au chargement
+  // Boutons + initialisation: 1 champ par macro au chargement
   document.getElementById('prot-add').onclick = ()=> addFoodRow('prot-list');
   document.getElementById('carb-add').onclick = ()=> addFoodRow('carb-list');
   document.getElementById('fat-add').onclick  = ()=> addFoodRow('fat-list');
@@ -185,7 +227,6 @@
       return;
     }
 
-    // Badge d’état
     const badge = document.getElementById('mix-badge');
     badge.textContent = '';
     if(!resp.ok){
@@ -195,7 +236,6 @@
       return;
     }
 
-    // Affichage humain
     const lines = [];
     const t = json.targets || {};
     const ft = json.final_totals || {};
@@ -211,24 +251,13 @@
       lines.push(`Kcal attendues d’après cibles : ${t.kcal_expected}`);
     }
 
-    // Si le backend renvoie des ajustements (optionnel)
-    if(json.adjustments){
-      const a = json.adjustments;
-      const parts = [];
-      if(a.carb_delta_g) parts.push(`Glucides ${a.carb_delta_g > 0 ? '↑' : '↓'} ${Math.abs(a.carb_delta_g)} g`);
-      if(a.fat_delta_g)  parts.push(`Lipides ${a.fat_delta_g  > 0 ? '↑' : '↓'} ${Math.abs(a.fat_delta_g)} g`);
-      if(parts.length){
-        badge.textContent = 'ℹ️ Ajustements automatiques appliqués : ' + parts.join(' · ');
-      }
-    } else {
-      // Si pas de champ "adjustments", on calcule juste l’écart macros vs cibles pour informer
-      const dP = Math.round((t.prot_g - (ft.prot_g||0)) * 10)/10;
-      const dC = Math.round((t.carb_g - (ft.carb_g||0)) * 10)/10;
-      const dF = Math.round((t.fat_g  - (ft.fat_g ||0)) * 10)/10;
-      const ok = Math.abs(dP)<=0.5 && Math.abs(dC)<=0.5 && Math.abs(dF)<=0.5;
-      badge.textContent = ok ? '✅ Cibles atteintes (arrondi au pas choisi).' :
-                               `⚠️ Écarts restants — Prot ${dP} g, Gluc ${dC} g, Lip ${dF} g`;
-    }
+    // Badge "écarts" simple
+    const dP = Math.round((t.prot_g - (ft.prot_g||0)) * 10)/10;
+    const dC = Math.round((t.carb_g - (ft.carb_g||0)) * 10)/10;
+    const dF = Math.round((t.fat_g  - (ft.fat_g ||0)) * 10)/10;
+    const ok = Math.abs(dP)<=0.5 && Math.abs(dC)<=0.5 && Math.abs(dF)<=0.5;
+    badge.textContent = ok ? '✅ Cibles atteintes (arrondi au pas 5 g).'
+                           : `⚠️ Écarts restants — Prot ${dP} g, Gluc ${dC} g, Lip ${dF} g`;
 
     document.getElementById('mix-out').textContent = lines.join('\n') + '\n\n' + JSON.stringify(json, null, 2);
   };
