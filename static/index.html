@@ -1,13 +1,6 @@
 <!doctype html><meta charset="utf-8">
 <title>FM Équivalences</title>
 <style>
-body{font:16px system-ui;margin:24px;max-width:820px}
-input,select,button{font:inherit;padding:8px;margin:6px 0}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.card{border:1px solid #eee;padding:16px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.06)}
-pre{background:#f8f8f8;padding:12px;border-radius:8px;overflow:auto}
-label{display:block;margin-top:8px}
-h1{margin-top:0}
   :root{--fg:#111;--muted:#666;--bg:#fff;--card:#fff;--border:#eaeaea}
   body{font:16px system-ui,Segoe UI,Roboto,Helvetica,Arial;margin:24px;max-width:980px;color:var(--fg);background:var(--bg)}
   h1{margin:0 0 8px 0}
@@ -38,46 +31,38 @@ h1{margin-top:0}
   <div class="tab" id="tab-meal">Alternative repas complet</div>
 </div>
 
-<div class="card">
-  <h3>Calcul direct</h3>
 <!-- ÉQUIVALENCE SIMPLE -->
 <section class="card" id="view-simple">
   <h3>Équivalence simple</h3>
   <div class="row">
     <div>
-      <label>Source</label>
       <label>Source (aliment)</label>
       <input id="s" placeholder="ex: Riz blanc à grains longs, cuit" list="s-dl">
       <datalist id="s-dl"></datalist>
     </div>
     <div>
-      <label>Grammes</label>
-      <input id="g" type="number" value="100" min="1">
       <label>Grammes (source)</label>
       <input id="g" type="number" min="1" value="100">
     </div>
   </div>
   <div class="row">
     <div>
-      <label>Cible</label>
       <label>Cible (aliment)</label>
       <input id="t" placeholder="ex: Spaghetti, cuit" list="t-dl">
       <datalist id="t-dl"></datalist>
     </div>
-@@ -42,17 +61,53 @@ <h3>Calcul direct</h3>
+    <div>
+      <label>Mode</label>
+      <select id="m">
+        <option value="carbs">Iso-glucides</option>
+        <option value="kcal">Iso-kcal</option>
+      </select>
+    </div>
   </div>
   <button id="go">Calculer</button>
   <pre id="out"></pre>
-</div>
 </section>
 
-<div class="card">
-  <h3>Photo de plan (OCR)</h3>
-  <input id="img" type="file" accept="image/*">
-  <button id="upload">Analyser</button>
-  <pre id="ocr"></pre>
-  <p style="font-size:14px;opacity:.8">Astuce: si l'OCR n'est pas installé sur le serveur, cette section renverra un message d'erreur. Le calcul direct fonctionne quand même.</p>
-</div>
 <!-- ALTERNATIVE REPAS COMPLET -->
 <section class="card" id="view-meal" style="display:none">
   <h3>Alternative repas complet</h3>
@@ -126,7 +111,10 @@ tabMeal.onclick = () => { tabMeal.classList.add('active'); tabSimple.classList.r
 async function suggest(el, dlid){
   const q=el.value.trim(); if(q.length<3) return;
   const r=await fetch('/search?q='+encodeURIComponent(q));
-@@ -63,18 +118,95 @@ <h3>Photo de plan (OCR)</h3>
+  const j=await r.json();
+  const dl=document.getElementById(dlid);
+  dl.innerHTML=j.results.map(x=>`<option value="${x}">`).join('');
+}
 document.getElementById('s').addEventListener('input',e=>suggest(e.target,'s-dl'));
 document.getElementById('t').addEventListener('input',e=>suggest(e.target,'t-dl'));
 
