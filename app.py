@@ -312,10 +312,13 @@ def suggest_plan(req: SuggestReq):
 
         # petite boucle de raffinement si hors tolérances
         for _ in range(30):
-            okK = abs(diff["kcal"]) <= 10
-            okP = abs(diff["prot_g"]) <= 3
-            if okK and okP:
-                break
+           okK = abs(diff["kcal"]) <= 10
+okP = abs(diff["prot_g"]) <= 3
+okC = abs(cur_tot["carb_g"] - final["carb_g"]) <= 5
+okF = abs(cur_tot["fat_g"] - final["fat_g"]) <= 5
+if okK and okP and okC and okF:
+    break
+
             # ajuste l'item le plus efficace pour la grandeur dominante
             goal_k = abs(diff["kcal"]) >= abs(diff["prot_g"])
             coeffs = K if goal_k else P
@@ -330,8 +333,13 @@ def suggest_plan(req: SuggestReq):
             x[idx] = newg
             suggestion[idx]["grams"] = float(newg)
             final = totals_for_plan(suggestion)
-            diff = {"kcal": round(cur_tot["kcal"] - final["kcal"], 2),
-                    "prot_g": round(cur_tot["prot_g"] - final["prot_g"], 2)}
+          diff = {
+    "kcal": round(cur_tot["kcal"] - final["kcal"], 2),
+    "prot_g": round(cur_tot["prot_g"] - final["prot_g"], 2),
+    "carb_g": round(cur_tot["carb_g"] - final["carb_g"], 2),
+    "fat_g": round(cur_tot["fat_g"] - final["fat_g"], 2)
+}
+
 
         return {
             "scope": "replace_only_these_items",
