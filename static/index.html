@@ -202,15 +202,21 @@
       return;
     }
 
-    const foods = {
+        const foods = {
       protein: collectFoods('prot-list'),
       carb:    collectFoods('carb-list'),
       fat:     collectFoods('fat-list'),
     };
-    if(foods.protein.length===0 || foods.carb.length===0 || foods.fat.length===0){
-      alert('Ajoute au moins 1 aliment dans chaque macro.');
-      return;
-    }
+-   if(foods.protein.length===0 || foods.carb.length===0 || foods.fat.length===0){
+-     alert('Ajoute au moins 1 aliment dans chaque macro.');
+-     return;
+-   }
++   const totalFoods = foods.protein.length + foods.carb.length + foods.fat.length;
++   if(totalFoods < 2){
++     alert('Ajoute au moins 2 aliments au total (ex. 1 protéine + 1 glucide).');
++     return;
++   }
+
 
     const body = { targets: { prot_g: tgP, carb_g: tgC, fat_g: tgF }, foods, round_to: 5 };
     let resp, json;
