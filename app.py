@@ -1,4 +1,4 @@
-# app.py — version "likes only" améliorée (précision accrue)
+# app.py — "likes only" priorisé (prot -> carb -> fat), sans grammes négatifs
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +14,6 @@ FOODS: List[str] = []
 LOAD_ERR: Optional[str] = None
 
 def lazy_load():
-    """Charge la base une seule fois."""
     global db, FOODS, LOAD_ERR, equivalent_portion, load_food_db
     if db is not None or LOAD_ERR is not None:
         return
@@ -53,40 +52,48 @@ def macros_for_grams(row, grams: float) -> Dict[str, float]:
     f = grams / 100.0
     def safe(col):
         try:
-            v = float(row[col])
-            return v
+            v = float(row[col]); return v if v==v else 0.0
         except Exception:
             return 0.0
     return {
-        "kcal": round(safe("kcal_per_100g") * f, 4),
-        "prot_g": round(safe("protein_g_per_100g") * f, 4),
-        "carb_g": round(safe("carb_g_per_100g") * f, 4),
-        "fat_g": round(safe("fat_g_per_100g") * f, 4),
-        "fiber_g": round(safe("fiber_g_per_100g") * f, 4),
+        "kcal":  round(safe("kcal_per_100g")       * f, 4),
+        "prot_g":round(safe("protein_g_per_100g")  * f, 4),
+        "carb_g":round(safe("carb_g_per_100g")     * f, 4),
+        "fat_g": round(safe("fat_g_per_100g")      * f, 4),
+        "fiber_g":round(safe("fiber_g_per_100g")   * f, 4),
     }
 
 def totals_for_plan(items: List[Dict[str, Any]]) -> Dict[str, float]:
     t = {"kcal": 0.0, "prot_g": 0.0, "carb_g": 0.0, "fat_g": 0.0, "fiber_g": 0.0}
     for it in items:
         r = row_for(it.get("aliment", ""))
-        if r is None:
-            continue
+        if r is None: continue
         g = float(it.get("grams", 0) or 0)
         m = macros_for_grams(r, g)
-        for k in t.keys():
-            t[k] += m[k]
-    for k in t.keys():
-        t[k] = round(t[k], 2)
+        for k in t.keys(): t[k] += m[k]
+    for k in t.keys(): t[k] = round(t[k], 2)
     return t
 
-def per_gram(row) -> Tuple[float, float]:
+def per_gram(row) -> Dict[str, float]:
     def safe(col):
         try:
-            v = float(row[col])
-            return 0.0 if v != v else v
+            v = float(row[col]); return v if v==v else 0.0
         except Exception:
             return 0.0
-    return safe("protein_g_per_100g")/100.0, safe("kcal_per_100g")/100.0
+    return {
+        "p": safe("protein_g_per_100g")/100.0,
+        "c": safe("carb_g_per_100g")/100.0,
+        "f": safe("fat_g_per_100g")/100.0,
+        "k": safe("kcal_per_100g")/100.0,
+    }
+
+def classify_by_macros(row) -> str:
+    m = per_gram(row)
+    p,c,f = m["p"], m["c"], m["f"]
+    if p >= c and p >= f and p >= 0.08: return "protein"
+    if c >= p and c >= f and c >= 0.15: return "carb"
+    if f >  c and f >  p and f  >= 0.08: return "fat"
+    return "mixed"
 
 # --------- App & static ---------
 app = FastAPI()
@@ -119,7 +126,7 @@ class EqReq(BaseModel):
     source: str
     grams: float
     target: str
-    mode: str = "carbs"
+    mode: str = "carbs"  # ou "kcal"
 
 @app.post("/equivalence")
 def equivalence(req: EqReq):
@@ -133,10 +140,11 @@ def equivalence(req: EqReq):
     except Exception as e:
         raise HTTPException(status_code=422, detail={"error": str(e)})
 
-# ---------- LIKE_MAP ----------
+# ---------- Synonymes simples ----------
 LIKE_MAP = {
     "chips": ["Croustilles", "Croustilles de maïs", "Chips"],
     "yogourt grec": ["Yogourt grec, nature, 0%", "Yogourt grec, nature, 2%"],
+    "yogourt": ["Yogourt grec, nature, 0%", "Yogourt, nature"],
     "fruit": ["Pomme", "Banane", "Fraises", "Bleuets", "Raisin", "Orange"],
     "pâtes": ["Spaghetti, cuit", "Macaroni, cuit", "Pâtes, cuites"],
     "riz": ["Riz brun, grains longs, cuit", "Riz blanc à grains longs, cuit", "Riz sauvage, cuit"],
@@ -145,16 +153,6 @@ LIKE_MAP = {
     "haricot": ["Haricots noirs, en conserve, égouttés", "Haricots rouges, bouillis"],
     "jus de pomme": ["Jus de pomme, non sucré"],
 }
-
-def bounds_for(nm: str) -> Tuple[float, Optional[float]]:
-    l = (nm or "").lower()
-    if any(k in l for k in ["yogourt", "boeuf", "poulet", "dinde", "poisson", "tofu"]):
-        return (90.0, 300.0)
-    if any(k in l for k in ["pomme de terre", "spaghetti", "pâtes", "riz", "pain", "avoine"]):
-        return (90.0, 250.0)
-    if any(k in l for k in ["croustille", "chips", "huile", "beurre", "arachide"]):
-        return (10.0, 60.0)
-    return (50.0, 250.0)
 
 def map_likes_to_exact_candidates(likes: List[str], foods: List[str]) -> List[str]:
     results: List[str] = []
@@ -166,18 +164,28 @@ def map_likes_to_exact_candidates(likes: List[str], foods: List[str]) -> List[st
         for key in keys:
             k = key.lower().strip()
             contains = [foods[i] for i, nm in enumerate(low) if k in nm]
-            if contains:
-                picked = contains[0]; break
+            if contains: picked = contains[0]; break
             close = difflib.get_close_matches(k, low, n=1, cutoff=0.6)
-            if close:
-                picked = foods[low.index(close[0])]; break
+            if close: picked = foods[low.index(close[0])]; break
         if picked and picked not in results:
             results.append(picked)
     return results
 
+# ---------- Bornes plausibles (min = 0 pour éviter négatifs) ----------
+def bounds_for(nm: str) -> Tuple[float, Optional[float]]:
+    l = (nm or "").lower()
+    if any(k in l for k in ["yogourt", "boeuf", "poulet", "dinde", "poisson", "tofu", "oeuf", "fromage"]):
+        return (0.0, 300.0)     # protéine
+    if any(k in l for k in ["pomme de terre", "spaghetti", "pâtes", "riz", "pain", "avoine", "quinoa"]):
+        return (0.0, 400.0)     # glucides
+    if any(k in l for k in ["croustille", "chips", "huile", "beurre", "amande", "noisette", "arachide", "chocolat"]):
+        return (0.0, 60.0)      # snacks/gras denses
+    return (0.0, 300.0)         # par défaut
+
+# ---------- Suggestion (priorité prot -> carb -> fat) ----------
 class SuggestReq(BaseModel):
-    current: List[Dict[str, Any]]
-    likes:   List[str]
+    current: List[Dict[str, Any]]   # aliments à remplacer (libellé + g)
+    likes:   List[str]              # envies (libellés libres)
     round_to: int = 5
 
 @app.post("/suggest-plan")
@@ -186,85 +194,159 @@ def suggest_plan(req: SuggestReq):
     if LOAD_ERR:
         raise HTTPException(status_code=500, detail=f"DB load failed: {LOAD_ERR}")
 
-    try:
-        if not req.current:
-            raise HTTPException(status_code=422, detail={"error": "Aucun aliment fourni."})
-        cur_tot = totals_for_plan(req.current)
+    # 1) Cibles à atteindre (basé sur "current")
+    if not req.current:
+        raise HTTPException(status_code=422, detail={"error": "Aucun aliment fourni dans 'current'."})
+    targets = totals_for_plan(req.current)  # on matche kcal ±10, prot ±3
 
-        if not req.likes:
-            raise HTTPException(status_code=422, detail={"error": "Aucune 'Envie' fournie."})
-        cand = map_likes_to_exact_candidates(req.likes, FOODS)
+    # 2) Candidats: uniquement ce que le client a écrit (avec synonymes)
+    if not req.likes:
+        raise HTTPException(status_code=422, detail={"error": "Aucune 'Envie' fournie."})
+    cands = map_likes_to_exact_candidates(req.likes, FOODS)
+    if not cands:
+        raise HTTPException(status_code=422, detail={"error": "Aucun des 'Envies' n'a été reconnu."})
 
-        names, P, K, C, F, B = [], [], [], [], [], []
-        for nm in cand:
-            r = row_for(nm)
+    # 3) Choisir au plus 1 aliment par catégorie, en respectant la priorité
+    prot = carb = fat = None
+    for nm in cands:
+        r = row_for(nm)
+        if r is None: continue
+        cat = classify_by_macros(r)
+        if cat == "protein" and prot is None: prot = nm
+        elif cat == "carb" and carb is None: carb = nm
+        elif cat == "fat" and fat is None: fat = nm
+    # fallback: si pas de carb/fat, on accepte "mixed" au besoin
+    if carb is None:
+        for nm in cands:
+            r = row_for(nm); 
             if r is None: continue
-            p_per_g, k_per_g = per_gram(r)
-            if abs(p_per_g)<1e-9 and abs(k_per_g)<1e-9: continue
-            names.append(nm)
-            P.append(p_per_g); K.append(k_per_g)
-            C.append(float(r.get("carb_g_per_100g", 0) or 0)/100.0)
-            F.append(float(r.get("fat_g_per_100g", 0) or 0)/100.0)
-            B.append(bounds_for(nm))
+            if classify_by_macros(r) == "mixed": carb = nm; break
+    if fat is None:
+        for nm in cands:
+            r = row_for(nm); 
+            if r is None: continue
+            if classify_by_macros(r) == "mixed": fat = nm; break
 
-        if len(P)<2:
-            raise HTTPException(status_code=422, detail={"error":"Pas assez de candidats."})
+    if prot is None:
+        raise HTTPException(status_code=422, detail={"error": "Aucune source de protéines reconnue dans 'Envies'."})
 
-        # --- Ajustement exact 2x2 (prot/kcal) ---
-        x0 = np.array([B[i][0] for i in range(len(names))], dtype=float)
-        restP, restK = np.dot(P,x0), np.dot(K,x0)
-        need = np.array([cur_tot["prot_g"]-restP, cur_tot["kcal"]-restK])
-        i1 = int(np.argmax(np.abs(P)))
-        alpha = (np.dot(P,K)/(np.dot(P,P)+1e-9))
-        residual_vec = np.array(K)-alpha*np.array(P)
-        i2 = int(np.argmax(np.abs(residual_vec)))
-        if i2==i1: i2=(i1+1)%len(names)
-        A2 = np.array([[P[i1],P[i2]],[K[i1],K[i2]]])
-        try:
-            sol2 = np.linalg.solve(A2,need)
-            x_exact = x0.copy(); x_exact[i1]+=sol2[0]; x_exact[i2]+=sol2[1]
-            x = x_exact
-        except Exception: x=x0
+    # 4) Récup per-gram + bornes
+    items = []
+    for nm in [prot, carb, fat]:
+        if nm is None: continue
+        r = row_for(nm)
+        g = per_gram(r)
+        lo, hi = bounds_for(nm)
+        items.append({"name": nm, "per": g, "lo": lo, "hi": hi, "g": 0.0})
 
-        # --- Arrondi d’affichage mais raffinement fin ---
-        step_user = max(1,int(req.round_to))
-        x = np.array([round(g/step_user)*step_user for g in x],dtype=float)
+    # 5) Étape A — régler la protéine d'abord
+    targetP = targets["prot_g"]
+    prot_item = items[0]  # toujours la protéine en premier
+    pP, pK = prot_item["per"]["p"], prot_item["per"]["k"]
+    if pP <= 0:
+        raise HTTPException(status_code=422, detail={"error": f"La protéine '{prot_item['name']}' n'apporte pas de protéines exploitables."})
+    gP = targetP / max(pP, 1e-9)
+    gP = min(max(gP, prot_item["lo"]), prot_item["hi"])
+    prot_item["g"] = gP
 
-        suggestion=[{"aliment":names[i],"grams":float(x[i])} for i in range(len(names))]
-        final=totals_for_plan(suggestion)
-        diff={k:round(cur_tot[k]-final[k],2) for k in ["kcal","prot_g","carb_g","fat_g"]}
+    # 6) Étape B — ajuster les kcal avec les glucides ensuite
+    targetK = targets["kcal"]
+    curK = pK * prot_item["g"]
+    curP = pP * prot_item["g"]
 
-        # --- Raffinement précis (1 g) ---
-        for _ in range(200):
-            okK=abs(diff["kcal"])<=10; okP=abs(diff["prot_g"])<=3
-            okC=abs(diff["carb_g"])<=5; okF=abs(diff["fat_g"])<=5
-            if okK and okP and okC and okF: break
+    carb_item = next((x for x in items if x["name"] != prot_item["name"] and x["per"]["c"] > 0), None)
+    if carb_item is not None:
+        cK, cP = carb_item["per"]["k"], carb_item["per"]["p"]
+        # grammes nécessaires par l'énergie restante
+        needK = targetK - curK
+        gC_energy = needK / max(cK, 1e-9)
+        # fenêtre protéique restante (±3 g)
+        minP = targetP - 3.0 - curP
+        maxP = targetP + 3.0 - curP
+        gC_min = 0.0 if cP <= 0 else max(0.0, minP / max(cP, 1e-9))
+        gC_max = carb_item["hi"] if cP <= 0 else min(carb_item["hi"], maxP / max(cP, 1e-9))
+        gC = min(max(gC_energy, max(carb_item["lo"], gC_min)), max(0.0, gC_max))
+        carb_item["g"] = gC
+        curK += cK * gC
+        curP += cP * gC
 
-            residuals={"kcal":abs(diff["kcal"])/10,"prot_g":abs(diff["prot_g"])/3,
-                       "carb_g":abs(diff["carb_g"])/5,"fat_g":abs(diff["fat_g"])/5}
-            key=max(residuals,key=residuals.get)
-            coeff_map={"kcal":K,"prot_g":P,"carb_g":C,"fat_g":F}
-            coeffs=coeff_map[key]; move=1 if diff[key]>0 else -1
+    # 7) Étape C — finir au besoin avec les lipides
+    fat_item = next((x for x in items if x["name"] != prot_item["name"] and (carb_item is None or x["name"] != carb_item["name"]) and x["per"]["f"] > 0), None)
+    if fat_item is not None:
+        fK, fP = fat_item["per"]["k"], fat_item["per"]["p"]
+        needK = targetK - curK
+        gF_energy = needK / max(fK, 1e-9)
+        # contrainte prot ±3 g
+        minP = targetP - 3.0 - curP
+        maxP = targetP + 3.0 - curP
+        gF_min = 0.0 if fP <= 0 else max(0.0, minP / max(fP, 1e-9))
+        gF_max = fat_item["hi"] if fP <= 0 else min(fat_item["hi"], maxP / max(fP, 1e-9))
+        gF = min(max(gF_energy, max(fat_item["lo"], gF_min)), max(0.0, gF_max))
+        fat_item["g"] = gF
+        curK += fK * gF
+        curP += fP * gF
 
-            best=None; gain=-1
-            for i in range(len(names)):
-                lo,hi=B[i]; nxt=x[i]+move
-                if (hi is not None and nxt>hi) or nxt<lo: continue
-                g=abs(coeffs[i])
-                if g>gain: gain=g; best=i
-            if best is None: break
+    # 8) Raffinement fin (±10 kcal / ±3 g prot) au pas de 1 g, sans jamais passer sous 0 ni au-dessus des bornes
+    def score(kdiff, pdiff):
+        # priorité: protéine puis kcal
+        return 2.0*abs(pdiff/3.0) + 1.0*abs(kdiff/10.0)
 
-            x[best]+=move; suggestion[best]["grams"]=float(x[best])
-            final=totals_for_plan(suggestion)
-            diff={k:round(cur_tot[k]-final[k],2) for k in ["kcal","prot_g","carb_g","fat_g"]}
+    for _ in range(200):
+        kdiff = targetK - curK
+        pdiff = targetP - curP
+        if abs(kdiff) <= 10 and abs(pdiff) <= 3:
+            break
 
-        return {"current_totals":cur_tot,"likes":req.likes,"candidates":names,
-                "suggested_recipe":suggestion,"final_totals":final,"residual_diff":diff}
+        # ordre d'ajustement: prot -> carb -> fat
+        improved = False
+        for item in items:
+            per = item["per"]; lo, hi = item["lo"], item["hi"]
+            # calcule l'effet d'un +1g ou -1g
+            moves = []
+            if item["g"] + 1 <= hi: moves.append(+1)
+            if item["g"] - 1 >= lo: moves.append(-1)
+            if not moves: continue
+            best_move, best_score = 0, 1e9
+            for mv in moves:
+                newK = curK + per["k"]*mv
+                newP = curP + per["p"]*mv
+                sc = score(targetK - newK, targetP - newP)
+                if sc < best_score:
+                    best_score, best_move = sc, mv
+            # n'applique que si ça améliore
+            if best_score + 1e-9 < score(kdiff, pdiff):
+                item["g"] += best_move
+                curK += per["k"]*best_move
+                curP += per["p"]*best_move
+                improved = True
+        if not improved:
+            break
 
-    except HTTPException: raise
-    except Exception as e:
-        raise HTTPException(status_code=422, detail={"error":f"suggest-plan failed: {e}"})
+    # 9) Arrondi d'affichage (pas utilisateur), clamp final
+    step = max(1, int(req.round_to))
+    for it in items:
+        it["g"] = float(max(it["lo"], min(it["hi"], round(it["g"]/step)*step)))
 
+    suggestion = [{"aliment": it["name"], "grams": it["g"]} for it in items]
+    final = totals_for_plan(suggestion)
+    diff = {
+        "kcal":   round(targets["kcal"]   - final["kcal"],   2),
+        "prot_g": round(targets["prot_g"] - final["prot_g"], 2),
+        "carb_g": round(targets["carb_g"] - final["carb_g"], 2),
+        "fat_g":  round(targets["fat_g"]  - final["fat_g"],  2),
+    }
+
+    return {
+        "scope": "replace_only_these_items",
+        "current_totals": targets,
+        "likes": req.likes,
+        "chosen": [it["name"] for it in items],     # prot, carb, fat (si présents)
+        "suggested_recipe": suggestion,             # grammes >= 0 et bornés
+        "final_totals": final,
+        "residual_diff": diff
+    }
+
+# ---------- Upload image (placeholder) ----------
 @app.post("/upload-plan")
-def upload_plan(file: UploadFile=File(...)):
-    return {"filename":file.filename,"note":"OCR non implémenté encore."}
+def upload_plan(file: UploadFile = File(...)):
+    return {"filename": file.filename, "note": "OCR non implémenté encore."}
