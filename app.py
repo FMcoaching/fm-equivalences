@@ -149,7 +149,7 @@ def bounds_for(nm: str) -> Tuple[float, Optional[float]]:
         return (0.0, 60.0)      # snacks/gras denses
     return (0.0, 300.0)         # par défaut
 
-# ===================== /mix-plan =====================
+# ===================== /mix-plan (2 aliments possibles) =====================
 
 class MixTargets(BaseModel):
     prot_g: float = Field(..., ge=0)
@@ -166,16 +166,36 @@ class MixReq(BaseModel):
     foods:   MixFoods
     round_to: int = 5
 
-def _mk_rows(names: List[str]):
-    rows = []
-    for nm in names[:3]:
+def _mk_all_rows(foods: MixFoods):
+    """Construit un dict {name -> rowObj unique} pour TOUS les aliments fournis,
+    peu importe le groupe (prot/carb/fat). Chaque rowObj contient grammes 'g' partagés."""
+    names = []
+    for lst in (foods.protein[:3], foods.carb[:3], foods.fat[:3]):
+        for nm in lst:
+            nm = nm.strip()
+            if nm and nm not in names:
+                names.append(nm)
+
+    rows_by_name = {}
+    for nm in names:
         r = row_for(nm)
         if r is None:
             continue
         per = per_gram(r)
         lo, hi = bounds_for(nm)
-        rows.append({"name": nm, "per": per, "lo": lo, "hi": hi, "g": 0.0})
-    return rows
+        rows_by_name[nm] = {"name": nm, "per": per, "lo": lo, "hi": hi, "g": 0.0}
+    return rows_by_name
+
+def _capability(rows, macro_key: str) -> float:
+    """Capacité maximale théorique du macro sur l’ensemble des aliments (en g de macro)."""
+    cap = 0.0
+    for r in rows.values():
+        per = r["per"][macro_key]
+        if per <= 1e-12: 
+            continue
+        hi = r["hi"] if r["hi"] is not None else 1e9
+        cap += per * max(0.0, hi - r["g"])
+    return cap
 
 def _clamp(v, lo, hi):
     v = max(lo, v)
@@ -190,8 +210,9 @@ def mix_plan(req: MixReq):
       1) Protéines (maximiser pour atteindre T.prot_g)
       2) Glucides (atteindre T.carb_g)
       3) Réajuster protéine si les glucides ont ajouté de la prot
-      4) Lipides : si zéro budget lipides, réduire automatiquement des glucides pour libérer des kcal,
+      4) Lipides : si zéro budget lipides, réduire automatiquement des glucides pour libérer des kcal;
          sinon message d’impossibilité
+      + Finition: micro-ajustements pour <= 0,5 g d'écart par macro si possible
     """
     lazy_load()
     if LOAD_ERR:
@@ -201,71 +222,78 @@ def mix_plan(req: MixReq):
     if T.prot_g <= 0 or T.carb_g <= 0 or T.fat_g <= 0:
         raise HTTPException(status_code=422, detail={"error": "Les trois macros (prot, gluc, lip) doivent être > 0 g."})
 
-    prot_rows = _mk_rows(req.foods.protein)
-    carb_rows = _mk_rows(req.foods.carb)
-    fat_rows  = _mk_rows(req.foods.fat)
+    # Rows uniques (2 aliments au total autorisés)
+    rows = _mk_all_rows(req.foods)
+    if len(rows) < 2:
+        raise HTTPException(status_code=422, detail={"error": "Ajoute au moins 2 aliments (au total)."})
+    # Pointeurs de groupe (référencent les mêmes objets)
+    def pick(names): return [rows[n] for n in names if n in rows]
+    prot_rows = pick(req.foods.protein)
+    carb_rows = pick(req.foods.carb)
+    fat_rows  = pick(req.foods.fat)
+    all_rows  = list(rows.values())
 
-    if not prot_rows or all(r["per"]["p"] <= 1e-12 for r in prot_rows):
-        raise HTTPException(status_code=422, detail={"error": "Aucune vraie source de protéines (ligne Protéines)."})
-    if not carb_rows or all(r["per"]["c"] <= 1e-12 for r in carb_rows):
-        raise HTTPException(status_code=422, detail={"error": "Aucune vraie source de glucides (ligne Glucides)."})
-    if not fat_rows  or all(r["per"]["f"] <= 1e-12 for r in fat_rows):
-        raise HTTPException(status_code=422, detail={"error": "Aucune vraie source de lipides (ligne Lipides)."})
+    # tri utilitaires
+    def by(desc_key):
+        return sorted(all_rows, key=lambda r: r["per"][desc_key], reverse=True)
 
-    # ---- 1) PROTÉINES ----
-    prot_rows.sort(key=lambda r: r["per"]["p"], reverse=True)
+    # --------- 1) PROTÉINES ---------
+    # Si aucune "prot" fournie, on prend les meilleurs contributeurs de prot parmi tous les aliments
+    P_cands = prot_rows if len(prot_rows)>0 else by("p")
     prot_target = T.prot_g
-    for r in prot_rows:
-        if prot_target <= 1e-9:
-            break
+    for r in P_cands:
+        if prot_target <= 1e-9: break
         ppg = r["per"]["p"]
-        if ppg <= 1e-12:
-            continue
+        if ppg <= 1e-12: continue
         need_g = prot_target / ppg
-        g = _clamp(need_g, r["lo"], r["hi"])
+        g = _clamp(need_g + r["g"], r["lo"], r["hi"])  # cumulatif si r déjà utilisé
+        dg = g - r["g"]
         r["g"] = g
-        prot_target -= ppg * g
+        prot_target -= ppg * dg
     if prot_target > 0.75:
+        # Vérifie si c’est un vrai manque de capacité
+        if _capability(rows, "p") < T.prot_g - (T.prot_g - prot_target):
+            raise HTTPException(status_code=422, detail={"error": "Capacité protéique insuffisante avec ces aliments/bornes."})
         raise HTTPException(status_code=422, detail={"error": "Impossible d’atteindre la protéine cible avec ces aliments et bornes."})
 
-    curK = sum(r["per"]["k"]*r["g"] for r in prot_rows)
-    curP = sum(r["per"]["p"]*r["g"] for r in prot_rows)
-    curC = sum(r["per"]["c"]*r["g"] for r in prot_rows)
-    curF = sum(r["per"]["f"]*r["g"] for r in prot_rows)
+    # Totaux courants
+    curK = sum(r["per"]["k"]*r["g"] for r in all_rows)
+    curP = sum(r["per"]["p"]*r["g"] for r in all_rows)
+    curC = sum(r["per"]["c"]*r["g"] for r in all_rows)
+    curF = sum(r["per"]["f"]*r["g"] for r in all_rows)
 
-    # ---- 2) GLUCIDES ----
-    carb_rows.sort(key=lambda r: (r["per"]["c"], -r["per"]["p"]), reverse=True)
+    # --------- 2) GLUCIDES ---------
+    C_cands = carb_rows if len(carb_rows)>0 else by("c")
     carb_target = max(0.0, T.carb_g - curC)
-    for r in carb_rows:
-        if carb_target <= 1e-9:
-            break
+    for r in C_cands:
+        if carb_target <= 1e-9: break
         cpg = r["per"]["c"]
-        if cpg <= 1e-12:
-            continue
+        if cpg <= 1e-12: continue
         need_g = carb_target / cpg
-        g = _clamp(need_g, r["lo"], r["hi"])
+        g = _clamp(need_g + r["g"], r["lo"], r["hi"])
+        dg = g - r["g"]
         r["g"] = g
-        carb_target -= cpg * g
+        curC += cpg * dg
+        curP += r["per"]["p"] * dg
+        curK += r["per"]["k"] * dg
+        curF += r["per"]["f"] * dg
+        carb_target = max(0.0, T.carb_g - curC)
     if carb_target > 0.75:
-        raise HTTPException(status_code=422, detail={"error": "Impossible d’atteindre les glucides cibles avec ces aliments (ou bornes trop strictes)."})
-
-    curK += sum(r["per"]["k"]*r["g"] for r in carb_rows)
-    curP += sum(r["per"]["p"]*r["g"] for r in carb_rows)
-    curC += sum(r["per"]["c"]*r["g"] for r in carb_rows)
-    curF += sum(r["per"]["f"]*r["g"] for r in carb_rows)
-
-    # ---- 3) RÉAJUSTER PROT si les glucides ont ajouté de la prot ----
+        if _capability(rows, "c") < T.carb_g:
+            raise HTTPException(status_code=422, detail={"error": "Capacité glucides insuffisante avec ces aliments/bornes."})
+        raise HTTPException(status_code=422, detail={"error": "Impossible d’atteindre les glucides cibles avec ces aliments (bornes)."})
+    
+    # --------- 3) RÉAJUSTER PROT si les glucides ont ajouté de la prot ---------
     overP = curP - T.prot_g
     if overP > 0.5:
-        # Réduire d'abord la protéine la moins efficiente (kcal/gramme prot le + élevé)
-        def kcal_per_prot(r):
-            return (r["per"]["k"] / max(r["per"]["p"], 1e-9)) if r["per"]["p"] > 0 else 1e9
-        prot_rows.sort(key=kcal_per_prot, reverse=True)
-        for r in prot_rows:
-            if overP <= 1e-9:
-                break
+        # Réduire d’abord l’aliment avec le plus mauvais ratio (kcal/prot élevé)
+        def kcal_per_prot(r): 
+            return (r["per"]["k"] / max(r["per"]["p"], 1e-9)) if r["per"]["p"]>0 else 1e9
+        P_red = sorted(P_cands, key=kcal_per_prot, reverse=True)
+        for r in P_red:
+            if overP <= 1e-9: break
             ppg = r["per"]["p"]
-            if ppg <= 1e-12 or r["g"] <= r["lo"] + 1e-9:
+            if ppg <= 1e-12 or r["g"] <= r["lo"] + 1e-9: 
                 continue
             reduc_g = min((overP / ppg), r["g"] - r["lo"])
             r["g"] -= reduc_g
@@ -277,33 +305,31 @@ def mix_plan(req: MixReq):
         if overP > 0.75:
             raise HTTPException(status_code=422, detail={"error": "Impossible de réajuster la protéine (bornes). Choisis des glucides moins protéiques."})
 
-    # ---- 4) LIPIDES (avec auto-réduction des glucides si nécessaire) ----
-    fat_rows.sort(key=lambda r: (r["per"]["f"], -r["per"]["p"]), reverse=True)
+    # --------- 4) LIPIDES (avec auto-réduction glucides si nécessaire) ---------
+    F_cands = fat_rows if len(fat_rows)>0 else by("f")
     fat_target = max(0.0, T.fat_g - curF)
 
     if fat_target <= 1e-6:
-        # Zéro budget lipides —> libérer des kcal en réduisant des glucides
+        # Zéro budget lipides -> libérer des kcal via glucides
         need_fat_g = max(0.0, T.fat_g - curF)
         if need_fat_g > 0:
             kcal_needed = need_fat_g * 9.0
-            carb_macro_to_reduce = kcal_needed / 4.0  # 1 g gluc = 4 kcal
+            carb_macro_to_reduce = kcal_needed / 4.0
 
-            # Réduire d'abord les glucides les plus "purs": peu de prot, beaucoup de carb
-            carb_rows.sort(key=lambda r: (r["per"]["p"], -r["per"]["c"]))
+            # Réduire d’abord les glucides les plus “purs” (peu de prot)
+            C_red = sorted(C_cands, key=lambda r: (r["per"]["p"], -r["per"]["c"]))
             remaining = carb_macro_to_reduce
-            for r in carb_rows:
-                if remaining <= 1e-6:
-                    break
+            for r in C_red:
+                if remaining <= 1e-6: break
                 cpg = r["per"]["c"]
-                if cpg <= 1e-12 or r["g"] <= r["lo"] + 1e-9:
+                if cpg <= 1e-12 or r["g"] <= r["lo"] + 1e-9: 
                     continue
                 max_c_macro_removable = cpg * (r["g"] - r["lo"])
                 take_c_macro = min(remaining, max_c_macro_removable)
-                if take_c_macro <= 0:
+                if take_c_macro <= 0: 
                     continue
                 dg = take_c_macro / cpg
                 r["g"] -= dg
-                # maj totaux
                 curC -= take_c_macro
                 curK -= r["per"]["k"] * dg
                 curP -= r["per"]["p"] * dg
@@ -311,140 +337,160 @@ def mix_plan(req: MixReq):
                 remaining -= take_c_macro
 
             if remaining > 1e-3:
-                # Impossible de libérer assez de kcal via glucides
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "error": "Aucun budget de lipides et réduction de glucides insuffisante (bornes).",
-                        "hint": "Choisis des glucides plus 'purs' (riz/pommes de terre) ou augmente les bornes."
-                    }
-                )
+                raise HTTPException(status_code=422, detail={
+                    "error": "Aucun budget lipides et réduction de glucides insuffisante (bornes).",
+                    "hint": "Ajoute une vraie source de lipides (huile/noix) ou change tes glucides pour plus 'purs'."
+                })
 
-            # Ajouter maintenant les lipides (kcal constantes)
+            # Ajouter maintenant les lipides
             fat_to_add = need_fat_g
-            for r in fat_rows:
-                if fat_to_add <= 1e-6:
-                    break
+            for r in F_cands:
+                if fat_to_add <= 1e-6: break
                 fpg = r["per"]["f"]
-                if fpg <= 1e-12:
-                    continue
+                if fpg <= 1e-12: continue
                 need_g = fat_to_add / fpg
                 headroom = (r["hi"] - r["g"]) if r["hi"] is not None else 1e9
                 dg = min(need_g, max(0.0, headroom))
-                if dg <= 0:
-                    continue
+                if dg <= 0: continue
                 r["g"] += dg
                 curF += fpg * dg
                 curK += r["per"]["k"] * dg
                 fat_to_add -= fpg * dg
 
             if fat_to_add > 1e-3:
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "error": "Impossible d’ajouter assez de lipides après réduction des glucides (bornes).",
-                        "hint": "Choisis une source de lipides plus dense (huile/noix) ou augmente les bornes."
-                    }
-                )
+                raise HTTPException(status_code=422, detail={
+                    "error": "Impossible d’ajouter assez de lipides après réduction des glucides (bornes).",
+                    "hint": "Choisis une source de lipides plus dense (huile/noix) ou augmente les bornes."
+                })
 
-            # Si la réduction des glucides a trop entamé la protéine, remonte-la et recompense en glucides
-            prot_short = T.prot_g - curP  # si positif, il manque de prot
+            # Si on a perdu trop de prot en réduisant les glucides → remonter via meilleurs ppg (parmi TOUS les aliments)
+            prot_short = T.prot_g - curP
             if prot_short > 0.5:
-                def eff(r):  # priorité aux aliments prot les plus efficients (kcal/prot faible)
-                    return (r["per"]["k"] / max(r["per"]["p"], 1e-9)) if r["per"]["p"] > 0 else 1e9
-                prot_rows.sort(key=eff)
-                remaining_p = prot_short
-                for r in prot_rows:
-                    if remaining_p <= 1e-6:
-                        break
+                P_up = by("p")  # meilleurs contributeurs de prot possibles (tous)
+                rem = prot_short
+                for r in P_up:
+                    if rem <= 1e-6: break
                     ppg = r["per"]["p"]
-                    if ppg <= 1e-12:
-                        continue
+                    if ppg <= 1e-12: continue
                     headroom = (r["hi"] - r["g"]) if r["hi"] is not None else 1e9
-                    if headroom <= 1e-9:
-                        continue
-                    dg = min(remaining_p / ppg, headroom)
+                    if headroom <= 1e-9: continue
+                    dg = min(rem / ppg, headroom)
                     r["g"] += dg
                     curP += ppg * dg
                     curK += r["per"]["k"] * dg
                     curC += r["per"]["c"] * dg
                     curF += r["per"]["f"] * dg
-                    remaining_p -= ppg * dg
+                    rem -= ppg * dg
 
-                # Pour garder les kcal constantes: si surplus de kcal, re-réduire un peu de glucides
+                # Garder les kcal constantes : si surplus kcal, re-réduire un peu de glucides
                 kcal_expected = 4*T.prot_g + 4*T.carb_g + 9*T.fat_g
                 kcal_over = curK - kcal_expected
                 if kcal_over > 0.5:
-                    c_macro_to_remove = kcal_over / 4.0
-                    carb_rows.sort(key=lambda r: (r["per"]["p"], -r["per"]["c"]))
-                    rem = c_macro_to_remove
-                    for r in carb_rows:
-                        if rem <= 1e-6:
-                            break
+                    C_red2 = sorted(C_cands, key=lambda r: (r["per"]["p"], -r["per"]["c"]))
+                    remC = kcal_over / 4.0
+                    for r in C_red2:
+                        if remC <= 1e-6: break
                         cpg = r["per"]["c"]
-                        if cpg <= 1e-12 or r["g"] <= r["lo"] + 1e-9:
+                        if cpg <= 1e-12 or r["g"] <= r["lo"] + 1e-9: 
                             continue
                         max_c_macro_removable = cpg * (r["g"] - r["lo"])
-                        take = min(rem, max_c_macro_removable)
-                        if take <= 0:
-                            continue
+                        take = min(remC, max_c_macro_removable)
+                        if take <= 0: continue
                         dg = take / cpg
                         r["g"] -= dg
                         curC -= take
                         curK -= r["per"]["k"] * dg
                         curP -= r["per"]["p"] * dg
                         curF -= r["per"]["f"] * dg
-                        rem -= take
-                    if rem > 1e-3:
-                        raise HTTPException(
-                            status_code=422,
-                            detail={
-                                "error": "Ajustement automatique impossible sans violer les bornes.",
-                                "hint": "Choisis des glucides plus 'purs' ou élargis les bornes."
-                            }
-                        )
+                        remC -= take
 
     else:
-        # Cas normal : on a du budget lipides
-        for r in fat_rows:
-            if fat_target <= 1e-9:
-                break
+        # Cas normal : on a un budget lipides
+        for r in F_cands:
+            if fat_target <= 1e-9: break
             fpg = r["per"]["f"]
-            if fpg <= 1e-12:
-                continue
+            if fpg <= 1e-12: continue
             need_g = fat_target / fpg
             headroom = (r["hi"] - r["g"]) if r["hi"] is not None else 1e9
             dg = min(need_g, max(0.0, headroom))
-            if dg <= 0:
-                continue
+            if dg <= 0: continue
             r["g"] += dg
             curF += fpg * dg
             curK += r["per"]["k"] * dg
             fat_target -= fpg * dg
-
         if fat_target > 1e-3:
             raise HTTPException(status_code=422, detail={
                 "error": "Impossible d’atteindre les lipides cibles (bornes).",
-                "hint": "Choisir une source de lipides plus dense (huile/noix) ou augmenter les bornes."
+                "hint": "Ajoute une vraie source de lipides (huile/noix) ou augmente les bornes."
             })
+
+    # --------- 5) Micro-finition (±0,5 g par macro si possible) ---------
+    # Boucle courte : on corrige la macro la plus en écart, 1 g d’aliment à la fois, dans les bornes.
+    for _ in range(400):
+        dP = T.prot_g - curP
+        dC = T.carb_g - curC
+        dF = T.fat_g  - curF
+        if abs(dP)<=0.5 and abs(dC)<=0.5 and abs(dF)<=0.5:
+            break
+        # choisir la dimension la plus en écart relatif
+        key, diff = max([("p", abs(dP)/0.5), ("c", abs(dC)/0.5), ("f", abs(dF)/0.5)], key=lambda x:x[1])
+        need_inc = ( (dP>0 and key=="p") or (dC>0 and key=="c") or (dF>0 and key=="f") )
+
+        # candidat le plus efficace pour cette macro
+        cand = None
+        if need_inc:
+            cand = max(all_rows, key=lambda r: r["per"][key])
+        else:
+            # réduire celui qui a le plus de macro par g (on enlève 1 g)
+            cand = max(all_rows, key=lambda r: r["per"][key])
+
+        if cand is None or cand["per"][key] <= 1e-12:
+            break
+
+        step = 1.0 if need_inc else -1.0
+        ng = cand["g"] + step
+        if ng < cand["lo"] or (cand["hi"] is not None and ng > cand["hi"]):
+            # pas possible sur ce cand, essaie le suivant
+            ordered = sorted(all_rows, key=lambda r: r["per"][key], reverse=True)
+            moved = False
+            for r in ordered:
+                if need_inc and r["per"][key] <= 1e-12: 
+                    continue
+                ng2 = r["g"] + step
+                if ng2 < r["lo"] or (r["hi"] is not None and ng2 > r["hi"]):
+                    continue
+                # applique
+                r["g"] = ng2
+                curP += r["per"]["p"] * step
+                curC += r["per"]["c"] * step
+                curF += r["per"]["f"] * step
+                curK += r["per"]["k"] * step
+                moved = True
+                break
+            if not moved:
+                break
+        else:
+            cand["g"] = ng
+            curP += cand["per"]["p"] * step
+            curC += cand["per"]["c"] * step
+            curF += cand["per"]["f"] * step
+            curK += cand["per"]["k"] * step
 
     # ---- Assemblage & sortie ----
     step = max(1, int(req.round_to))
     suggestion = []
-    for rows in (prot_rows, carb_rows, fat_rows):
-        for r in rows:
-            g = float(_clamp(round(r["g"]/step)*step, r["lo"], r["hi"] if r["hi"] is not None else 1e9))
-            if g > 0:
-                suggestion.append({"aliment": r["name"], "grams": g})
+    for r in all_rows:
+        g = float(_clamp(round(r["g"]/step)*step, r["lo"], r["hi"] if r["hi"] is not None else 1e9))
+        if g > 0:
+            suggestion.append({"aliment": r["name"], "grams": g})
 
     final = totals_for_plan(suggestion)
     kcal_expected = round(4*T.prot_g + 4*T.carb_g + 9*T.fat_g, 2)
-
     return {
         "targets": {"prot_g": T.prot_g, "carb_g": T.carb_g, "fat_g": T.fat_g, "kcal_expected": kcal_expected},
         "suggested_recipe": suggestion,
         "final_totals": final,
-        "note": "Ordre: prot → glucides → réajust prot → lipides. Si lipides initialement impossibles, réduction automatique des glucides pour libérer des kcal."
+        "note": "Ordre: prot → glucides → réajust prot → lipides. Accepte 2 aliments total; réduit auto les glucides si lipides indisponibles."
     }
 
 # ---------- Upload image (placeholder) ----------
