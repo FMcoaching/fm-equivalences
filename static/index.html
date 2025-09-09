@@ -18,10 +18,8 @@
   .grid-3{display:grid;grid-template-columns:1fr 120px 40px;gap:10px;align-items:center}
   .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .grid-1{display:grid;grid-template-columns:1fr;gap:10px}
-  .pill{display:inline-block;padding:2px 8px;border:1px solid var(--border);border-radius:999px;font-size:12px;margin-right:6px}
   pre{background:#f8f8f8;padding:12px;border-radius:10px;overflow:auto}
   .foot{font-size:12px;color:#777;margin-top:8px}
-  .ok{color:#0a7a2f}.warn{color:#b55b00}.err{color:#b00020}
 </style>
 
 <h1>Équivalences alimentaires (FM)</h1>
@@ -77,7 +75,6 @@
         <label>Glucides (g)</label><input id="tgC" type="number" min="1" value="60"><div></div>
         <label>Lipides (g)</label><input id="tgF" type="number" min="1" value="15"><div></div>
       </div>
-      <div class="foot">Entre des cibles &gt; 0 pour chaque macro.</div>
     </div>
 
     <div class="card">
@@ -88,21 +85,19 @@
     </div>
   </div>
 
-  <!-- Listes d’aliments par macro -->
+  <!-- Listes d’aliments -->
   <div class="row">
     <div class="card">
       <h4>Protéines — aliments (max 3)</h4>
       <div id="prot-list" class="grid-1"></div>
       <button id="prot-add">+ Ajouter un aliment protéine</button>
     </div>
-
     <div class="card">
       <h4>Glucides — aliments (max 3)</h4>
       <div id="carb-list" class="grid-1"></div>
       <button id="carb-add">+ Ajouter un aliment glucides</button>
     </div>
   </div>
-
   <div class="row">
     <div class="card">
       <h4>Lipides — aliments (max 3)</h4>
@@ -113,12 +108,12 @@
 
   <div class="foot">
     Ordre appliqué : <b>Protéines → Glucides → Réajust Protéines → Lipides</b>.<br>
-    Si aucun budget de lipides n’est disponible, l’appli tente de <b>réduire automatiquement les glucides</b> pour libérer des calories.
+    Si aucun budget de lipides n’est dispo, l’appli <b>réduit automatiquement les glucides</b> pour libérer des calories.
   </div>
 </section>
 
 <script>
-  // ---- UI Tabs ----
+  // ---- Onglets ----
   const tabSimple = document.getElementById('tab-simple');
   const tabMeal   = document.getElementById('tab-meal');
   const viewSimple = document.getElementById('view-simple');
@@ -129,20 +124,18 @@
     tabMeal.classList.remove('active');
     viewSimple.style.display = 'block';
     viewMeal.style.display   = 'none';
-    if (location.hash !== '#simple') history.replaceState(null,'','#simple');
   }
   function showMeal(){
     tabMeal.classList.add('active');
     tabSimple.classList.remove('active');
     viewMeal.style.display   = 'block';
     viewSimple.style.display = 'none';
-    if (location.hash !== '#meal') history.replaceState(null,'','#meal');
   }
-  tabSimple?.addEventListener('click', showSimple);
-  tabMeal?.addEventListener('click', showMeal);
-  if (location.hash === '#meal') { showMeal(); } else { showSimple(); }
 
-  // ---- Autocomplete helper ----
+  tabSimple.addEventListener('click', showSimple);
+  tabMeal.addEventListener('click', showMeal);
+
+  // ---- Autocomplete ----
   async function suggest(el, dlid){
     const q=el.value.trim(); if(q.length<3) return;
     const r=await fetch('/search?q='+encodeURIComponent(q));
@@ -150,6 +143,8 @@
     const dl=document.getElementById(dlid);
     dl.innerHTML=j.results.map(x=>`<option value="${x}">`).join('');
   }
+  document.getElementById('s').addEventListener('input',e=>suggest(e.target,'s-dl'));
+  document.getElementById('t').addEventListener('input',e=>suggest(e.target,'t-dl'));
 
   // ---- Simple equivalence ----
   document.getElementById('go').onclick=async ()=>{
@@ -159,7 +154,7 @@
     out.textContent = JSON.stringify(j, null, 2);
   };
 
-  // --- helpers pour les lignes d'aliments par macro ---
+  // ---- helpers pour les lignes d'aliments ----
   function addFoodRow(containerId){
     const cont = document.getElementById(containerId);
     const i = cont.querySelectorAll('input').length;
@@ -177,14 +172,11 @@
     input.addEventListener('input', e => suggest(e.target, dlid));
     wrap.querySelector('button').onclick = ()=> cont.removeChild(wrap);
   }
-
-  // Boutons + initialisation: 1 champ par macro au chargement
   document.getElementById('prot-add').onclick = ()=> addFoodRow('prot-list');
   document.getElementById('carb-add').onclick = ()=> addFoodRow('carb-list');
   document.getElementById('fat-add').onclick  = ()=> addFoodRow('fat-list');
   ['prot-list','carb-list','fat-list'].forEach(id=> addFoodRow(id));
 
-  // Collecte des aliments d’un bloc
   function collectFoods(containerId){
     return Array.from(document.querySelectorAll(`#${containerId} input`))
       .map(el => el.value.trim())
@@ -192,7 +184,7 @@
       .slice(0,3);
   }
 
-  // --- Calcul /mix-plan ---
+  // ---- Calcul /mix-plan ----
   document.getElementById('mix-calc').onclick = async ()=>{
     const tgP = Number(document.getElementById('tgP').value||0);
     const tgC = Number(document.getElementById('tgC').value||0);
@@ -201,70 +193,39 @@
       alert('Entre des cibles > 0 pour Protéines, Glucides et Lipides.');
       return;
     }
-
-        const foods = {
+    const foods = {
       protein: collectFoods('prot-list'),
       carb:    collectFoods('carb-list'),
       fat:     collectFoods('fat-list'),
     };
--   if(foods.protein.length===0 || foods.carb.length===0 || foods.fat.length===0){
--     alert('Ajoute au moins 1 aliment dans chaque macro.');
--     return;
--   }
-+   const totalFoods = foods.protein.length + foods.carb.length + foods.fat.length;
-+   if(totalFoods < 2){
-+     alert('Ajoute au moins 2 aliments au total (ex. 1 protéine + 1 glucide).');
-+     return;
-+   }
-
-
-    const body = { targets: { prot_g: tgP, carb_g: tgC, fat_g: tgF }, foods, round_to: 5 };
-    let resp, json;
-    try{
-      resp = await fetch('/mix-plan', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(body)
-      });
-      json = await resp.json();
-    }catch(e){
-      document.getElementById('mix-badge').textContent = '';
-      document.getElementById('mix-out').textContent = '❌ Erreur réseau.';
+    const totalFoods = foods.protein.length + foods.carb.length + foods.fat.length;
+    if(totalFoods < 2){
+      alert('Ajoute au moins 2 aliments au total.');
       return;
     }
+
+    const body = { targets: { prot_g: tgP, carb_g: tgC, fat_g: tgF }, foods, round_to: 5 };
+    const resp = await fetch('/mix-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const json = await resp.json();
 
     const badge = document.getElementById('mix-badge');
     badge.textContent = '';
     if(!resp.ok){
-      const msg = (json && (json.detail?.error || json.error)) || 'Demande impossible';
-      badge.textContent = '❌ ' + msg;
+      badge.textContent = '❌ ' + (json.detail?.error || json.error || 'Demande impossible');
       document.getElementById('mix-out').textContent = JSON.stringify(json, null, 2);
       return;
     }
-
     const lines = [];
-    const t = json.targets || {};
-    const ft = json.final_totals || {};
     if(json.suggested_recipe){
       lines.push('Recette proposée :');
-      json.suggested_recipe.forEach(it => lines.push(`- ${it.aliment}: ${it.grams} g`));
+      json.suggested_recipe.forEach(it=> lines.push(`- ${it.aliment}: ${it.grams} g`));
       lines.push('');
     }
-    if(ft.kcal !== undefined){
+    if(json.final_totals){
+      const ft=json.final_totals;
       lines.push(`Totaux estimés : Prot ${ft.prot_g} g, Gluc ${ft.carb_g} g, Lip ${ft.fat_g} g, Kcal ${ft.kcal}`);
     }
-    if(t.kcal_expected !== undefined){
-      lines.push(`Kcal attendues d’après cibles : ${t.kcal_expected}`);
-    }
-
-    // Badge "écarts" simple
-    const dP = Math.round((t.prot_g - (ft.prot_g||0)) * 10)/10;
-    const dC = Math.round((t.carb_g - (ft.carb_g||0)) * 10)/10;
-    const dF = Math.round((t.fat_g  - (ft.fat_g ||0)) * 10)/10;
-    const ok = Math.abs(dP)<=0.5 && Math.abs(dC)<=0.5 && Math.abs(dF)<=0.5;
-    badge.textContent = ok ? '✅ Cibles atteintes (arrondi au pas 5 g).'
-                           : `⚠️ Écarts restants — Prot ${dP} g, Gluc ${dC} g, Lip ${dF} g`;
-
+    badge.textContent = '✅ Calcul réussi';
     document.getElementById('mix-out').textContent = lines.join('\n') + '\n\n' + JSON.stringify(json, null, 2);
   };
 </script>
