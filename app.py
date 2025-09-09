@@ -142,7 +142,7 @@ def equivalence(req: EqReq):
 def bounds_for(nm: str) -> Tuple[float, Optional[float]]:
     l = (nm or "").lower()
     if any(k in l for k in ["yogourt", "boeuf", "poulet", "dinde", "poisson", "tofu", "oeuf", "fromage"]):
-        return (0.0, 300.0)     # protéine
+        return (0.0, 400.0)     # protéine
     if any(k in l for k in ["pomme de terre", "spaghetti", "pâtes", "riz", "pain", "avoine", "quinoa"]):
         return (0.0, 400.0)     # glucides
     if any(k in l for k in ["croustille", "chips", "huile", "beurre", "amande", "noisette", "arachide", "chocolat"]):
